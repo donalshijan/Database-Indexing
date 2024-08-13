@@ -1,0 +1,37 @@
+# Binaries
+/bin/
+/build/
+
+# Go Modules
+/vendor/
+# If using dep
+/Gopkg.lock
+/Gopkg.toml
+
+# Test and Coverage Reports
+*.cover
+*.test
+
+# IDE/Editor Files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Windows
+.Thumbs.db
+
+# Compiled output
+*.o
+*.a
+*.out
+*.exe
+
+# Environment Files
+.env
+
+# Logs
+*.log
