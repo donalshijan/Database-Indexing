@@ -6,6 +6,7 @@ type LSMTree struct {
 
 func NewLSMTree() *LSMTree {
 	// Initialize and return a new LSM Tree
+	return nil
 }
 
 func (lsm *LSMTree) Insert(key, value string) {
@@ -14,4 +15,5 @@ func (lsm *LSMTree) Insert(key, value string) {
 
 func (lsm *LSMTree) Search(key string) (string, bool) {
 	// Search for key in LSM Tree
+	return "", false
 }

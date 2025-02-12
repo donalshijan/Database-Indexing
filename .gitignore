@@ -33,5 +33,10 @@
 # Environment Files
 .env
 
+# But explicitly track environment.env
+!environment.env
+
 # Logs
 *.log
+# db files
+*.db
