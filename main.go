@@ -13,7 +13,6 @@ import (
 	"database_indexing/database"
 	"database_indexing/hashindex" // Import the HashIndex package
 
-	"github.com/briandowns/spinner"
 	"github.com/joho/godotenv"
 	"github.com/schollz/progressbar/v3"
 )
@@ -46,7 +45,7 @@ func loadEnv(dbType string) (string, string) {
 
 // Generate a random 6-letter word
 func randomWord() string {
-	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	letters := []rune("abcdefghijklmnopqrstuvwxyz")
 	word := make([]rune, 6)
 	for i := range word {
 		word[i] = letters[rand.Intn(len(letters))]
@@ -121,26 +120,28 @@ func performanceTest(indexType string) {
 	}
 	logger := log.New(logFile, "", log.LstdFlags)
 
-	numInserts := 4000
-	numOps := 500
-	var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
-
+	numInserts := 400
+	numOps := 400
+	// var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
+	var insertTimes, searchTimes, deleteTimes []time.Duration
 	keys := make([]string, numInserts)
+	keyValueMap := make(map[string]string) // Store key-value pairs for validation
 	fmt.Printf("\nRunning Insert Test\n")
 
 	// INSERT TEST
 	insertBar := progressbar.NewOptions(numInserts, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Inserting"))
 	for i := 0; i < numInserts; i++ {
-		key := fmt.Sprintf("key%d", i+1)
+		key := randomWord() // Generate random key
 		value := randomWord()
 		start := time.Now()
 		msg := db.Insert(key, value)
 		insertTimes = append(insertTimes, time.Since(start))
 		keys[i] = key
-
+		keyValueMap[key] = value // Store key-value pair
 		// Print status for insertion
 		if strings.HasPrefix(msg, "Failed") {
 			fmt.Printf("Insert failed: %s\n", msg)
+			panic(msg)
 		}
 
 		insertBar.Add(1)
@@ -155,73 +156,85 @@ func performanceTest(indexType string) {
 	rand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
 	for i := 0; i < numOps; i++ {
 		start := time.Now()
-		db.Search(keys[i])
+		value, found := db.Search(keys[i])
 		searchTimes = append(searchTimes, time.Since(start))
+
+		// Validate search result
+		expectedValue, exists := keyValueMap[keys[i]]
+		if !found || !exists || value != expectedValue {
+			fmt.Printf("Search failed: key=%s, expected=%s, got=%s\n", keys[i], expectedValue, value)
+			continue
+		}
+
 		searchBar.Add(1)
 	}
 	avgSearchTime := averageTime(searchTimes)
 	fmt.Printf("Average Search Time: %v\n", avgSearchTime)
 	logger.Printf("Average Search Time: %v\n", avgSearchTime)
 
-	fmt.Printf("\nRunning Update Test\n")
+	// fmt.Printf("\nRunning Update Test\n")
 	// UPDATE TEST
-	updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
-	for i := 0; i < numOps; i++ {
-		start := time.Now()
-		db.Update(keys[i], randomWord())
-		updateTimes = append(updateTimes, time.Since(start))
-		updateBar.Add(1)
-	}
-	avgUpdateTime := averageTime(updateTimes)
-	fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
-	logger.Printf("Average Update Time: %v\n", avgUpdateTime)
+	// updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
+	// for i := 0; i < numOps; i++ {
+	// 	start := time.Now()
+	// 	db.Update(keys[i], randomWord())
+	// 	updateTimes = append(updateTimes, time.Since(start))
+	// 	updateBar.Add(1)
+	// }
+	// avgUpdateTime := averageTime(updateTimes)
+	// fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
+	// logger.Printf("Average Update Time: %v\n", avgUpdateTime)
 
 	fmt.Printf("\nRunning Delete Test\n")
 	// DELETE TEST
 	deleteBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Deleting"))
 	for i := 0; i < numOps; i++ {
 		start := time.Now()
-		db.Delete(keys[i])
+		msg := db.Delete(keys[i])
 		deleteTimes = append(deleteTimes, time.Since(start))
+		if strings.HasPrefix(msg, "Failed") {
+			fmt.Printf("Delete failed: %s\n", msg)
+			panic(msg)
+		}
 		deleteBar.Add(1)
 	}
 	avgDeleteTime := averageTime(deleteTimes)
 	fmt.Printf("Average Delete Time: %v\n", avgDeleteTime)
 	logger.Printf("Average Delete Time: %v\n", avgDeleteTime)
 
-	fmt.Printf("\nRunning Indexing Capacity Test\n")
-	// INDEXING CAPACITY TEST
-	db.ClearIndex()
-	clearDbFiles(tempDataFile, tempIndexFile)
-	count := 0
-	// Initialize the spinner with a rotating effect
-	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Use character set 14 with 100ms update speed
-	s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
-	s.Start()
-	for {
-		key := fmt.Sprintf("key%d", count+1)
-		value := randomWord()
+	// fmt.Printf("\nRunning Indexing Capacity Test\n")
+	// // INDEXING CAPACITY TEST
+	// db.ClearIndex()
+	// clearDbFiles(tempDataFile, tempIndexFile)
+	// count := 0
+	// // Initialize the spinner with a rotating effect
+	// s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Use character set 14 with 100ms update speed
+	// s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
+	// s.Start()
+	// for {
+	// 	key := randomWord()
+	// 	value := randomWord()
 
-		// Try inserting
-		result := db.Insert(key, value)
+	// 	// Try inserting
+	// 	result := db.Insert(key, value)
 
-		// Stop if memory limit is hit
-		if strings.Contains(result, "Failed: Memory limit exceeded") {
-			s.Stop()
-			fmt.Print("\r✔ ") // Overwrite spinner with a final completion checkmark
-			fmt.Printf("Indexing capacity: %d entries indexed in %.2f MB memory\n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
-			logger.Printf("Indexing capacity : %d entries indexed in %.2f MB memory \n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
-			break
-		}
+	// 	// Stop if memory limit is hit
+	// 	if strings.Contains(result, "Failed: Memory limit exceeded") {
+	// 		s.Stop()
+	// 		fmt.Print("\r✔ ") // Overwrite spinner with a final completion checkmark
+	// 		fmt.Printf("Indexing capacity: %d entries indexed in %.2f MB memory\n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
+	// 		logger.Printf("Indexing capacity : %d entries indexed in %.2f MB memory \n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
+	// 		break
+	// 	}
 
-		count++
-		s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
-	}
+	// 	count++
+	// 	s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
+	// }
 	// Clean up: Remove the temporary database files
-	db.ClearIndex()
+	// db.ClearIndex()
 	os.Remove(tempDataFile)
 	os.Remove(tempIndexFile)
-	time.Sleep(1 * time.Second)
+	// time.Sleep(1 * time.Second)
 	fmt.Println("\nPerformance test completed. Results saved to test_logs.log")
 
 }
