@@ -29,6 +29,7 @@ type BTree struct {
 	Root               *BTreeNode
 	currentMemoryUsage int
 	maxEntries         int
+	minEntries         int
 }
 type IndexEntry struct {
 	Key        string
@@ -50,16 +51,17 @@ func (bti *BTreeIndex) GetMaxMemoryUsage() int64 {
 }
 
 func NewBTreeIndex(dataFilename, encodedBTreeIndexFileFilename string) *BTreeIndex {
-	btree, err := NewBTree() // Call NewBTree to get the BTree
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create BTree: %v", err)) // Handle error (or return it)
-	}
 
 	btreeIndex := &BTreeIndex{
 		dataFile:              dataFilename,
 		encodedBTreeIndexFile: encodedBTreeIndexFileFilename,
-		btree:                 btree, // Assign the BTree to the index field
+		btree:                 nil, // Assign the BTree to the index field
 	}
+	btree, err := NewBTree() // Call NewBTree to get the BTree
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create BTree: %v", err)) // Handle error (or return it)
+	}
+	btreeIndex.btree = btree
 	btreeIndex.loadIndex()
 	return btreeIndex
 }
@@ -78,10 +80,12 @@ func (btreeIndex *BTreeIndex) loadIndex() {
 
 // NewBTree creates a new B-tree with an empty root
 func NewBTree() (*BTree, error) {
+	branching_factor := 4
 	return &BTree{
 		Root:               nil, // The root is initially set to nil
 		currentMemoryUsage: 0,
-		maxEntries:         5,
+		maxEntries:         2*branching_factor - 1,
+		minEntries:         branching_factor - 1,
 	}, nil
 }
 
@@ -691,73 +695,6 @@ func (bt *BTree) searchKey(node *BTreeNode, key string) int64 {
 	return bt.searchKey(node.Children[i].ChildNode, key)
 }
 
-func (bt *BTree) LoadBTree(encodedBTreeIndexFilefilename string) (*BTree, error) {
-	file, err := os.Open(encodedBTreeIndexFilefilename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		return nil, scanner.Err()
-	}
-
-	data := scanner.Text()
-	bt, err = parseNode(data, bt)
-	return bt, err
-}
-
-func parseNode(data string, bt *BTree) (*BTree, error) {
-	for strings.HasPrefix(data, "}") {
-		data = data[1:]
-	}
-	for strings.HasPrefix(data, "{") {
-		data = data[1:]
-	}
-	parts := strings.SplitN(data, ":", 2)
-	if len(parts) != 2 {
-		return bt, nil
-	}
-	key := parts[0]
-
-	value, rest := splitAtFirstCurly(parts[1])
-	valueInt, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return bt, err
-	}
-	node := IndexEntry{
-		Key:        key,
-		FileOffset: valueInt,
-	}
-	//insert node to btree
-	bt.Insert(node)
-	if rest != "" {
-		bt, err = parseNode(rest, bt)
-		return bt, err
-	}
-	return bt, nil
-}
-
-func splitAtFirstCurly(s string) (string, string) {
-	// Find the first occurrence of either '{' or '}' in the string
-	openCurly := strings.Index(s, "{")
-	closeCurly := strings.Index(s, "}")
-
-	// Determine the smallest index (the first occurrence)
-	if openCurly == -1 && closeCurly == -1 {
-		return s, "" // No delimiters found
-	} else if openCurly == -1 {
-		return s[:closeCurly], s[closeCurly:]
-	} else if closeCurly == -1 {
-		return s[:openCurly], s[openCurly:]
-	} else if openCurly < closeCurly {
-		return s[:openCurly], s[openCurly:]
-	} else {
-		return s[:closeCurly], s[closeCurly:]
-	}
-}
-
 func (bti *BTreeIndex) EncodeBTreeIndexToFile() error {
 	file, err := os.Create(bti.encodedBTreeIndexFile)
 	if err != nil {
@@ -861,7 +798,19 @@ func (bt *BTree) delete(key string) string {
 	if bt.Root == nil {
 		return fmt.Sprintf("Failed: Key '%s' does not exist", key)
 	}
-	return bt.deleteRecursive(bt.Root, key)
+	msg := bt.deleteRecursive(bt.Root, key)
+
+	// If root is empty and has children, make first child the new root
+	// if len(bt.Root.Entries) == 0 {
+	// 	if len(bt.Root.Children) > 0 {
+	// 		bt.Root = bt.Root.Children[0].ChildNode
+	// 		bt.Root.Parent = nil
+	// 	} else {
+	// 		bt.Root = nil
+	// 	}
+	// }
+
+	return msg
 }
 
 func (bt *BTree) deleteRecursive(node *BTreeNode, key string) string {
@@ -883,14 +832,113 @@ func (bt *BTree) deleteRecursive(node *BTreeNode, key string) string {
 
 	// Case 2: If the node is an INTERNAL NODE
 	if i < len(node.Entries) && node.Entries[i].Key == key {
-		return bt.deleteInternalNodeEntry(node, i, key)
+		return bt.deleteInternalNodeEntry(node, i)
 	}
 
 	// Case 3: Key is in a subtree, recurse into the correct child
 	if node.Children[i].ChildNode == nil {
 		return fmt.Sprintf("Failed: Key '%s' not found in tree", key)
 	}
+	child := node.Children[i].ChildNode
+	if len(child.Entries) < bt.minEntries {
+		bt.fillUnderflow(node, i)
+	}
 	return bt.deleteRecursive(node.Children[i].ChildNode, key)
+}
+
+func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
+	child := parent.Children[index].ChildNode
+
+	// Try borrowing from left sibling
+	if index > 0 && len(parent.Children[index-1].ChildNode.Entries) > bt.minEntries {
+		leftSibling := parent.Children[index-1].ChildNode
+
+		// Move last key from leftSibling to parent
+		newEntries := make([]IndexEntry, len(child.Entries)+1)
+		newEntries[0] = parent.Entries[index-1]
+		copy(newEntries[1:], child.Entries) // Shift child entries to the right
+		child.Entries = newEntries
+
+		// Move key from leftSibling to parent
+		parent.Entries[index-1] = leftSibling.Entries[len(leftSibling.Entries)-1]
+		newSiblingEntries := make([]IndexEntry, len(leftSibling.Entries)-1)
+		copy(newSiblingEntries, leftSibling.Entries[:len(leftSibling.Entries)-1])
+		leftSibling.Entries = newSiblingEntries
+
+		// 🔹 Move last child pointer (index file reference) from leftSibling to child
+		newChildren := make([]ChildPointer, len(child.Children)+1)
+		// Update child pointers
+		if leftSibling.Children[len(leftSibling.Children)-1].ChildNode != nil {
+			for _, child_pointer := range leftSibling.Children[len(leftSibling.Children)-1].ChildNode.Children {
+				if child_pointer.ChildNode != nil {
+					child_pointer.ChildNode.Parent = child
+				}
+			}
+		}
+
+		newChildren[0] = leftSibling.Children[len(leftSibling.Children)-1] // Move the last child
+		copy(newChildren[1:], child.Children)                              // Shift existing child pointers to the right
+		child.Children = newChildren
+
+		// Remove the moved child pointer from leftSibling
+		newSiblingChildren := make([]ChildPointer, len(leftSibling.Children)-1)
+		copy(newSiblingChildren, leftSibling.Children[:len(leftSibling.Children)-1])
+		leftSibling.Children = newSiblingChildren
+
+		violation := bt.CheckInvarianceViolation()
+		if violation {
+			panic("violation happened after fillUnderflow")
+		}
+		return
+	}
+
+	// Try borrowing from right sibling
+	if index < len(parent.Children)-1 && len(parent.Children[index+1].ChildNode.Entries) > bt.minEntries {
+		rightSibling := parent.Children[index+1].ChildNode
+
+		// Move first key from rightSibling to parent
+		newEntries := make([]IndexEntry, len(child.Entries)+1)
+		copy(newEntries, child.Entries)                        // Copy existing entries
+		newEntries[len(child.Entries)] = parent.Entries[index] // Append parent's entry
+		child.Entries = newEntries
+
+		// Move key from rightSibling to parent
+		parent.Entries[index] = rightSibling.Entries[0]
+		newSiblingEntries := make([]IndexEntry, len(rightSibling.Entries)-1)
+		copy(newSiblingEntries, rightSibling.Entries[1:])
+		rightSibling.Entries = newSiblingEntries
+
+		// 🔹 Move first child pointer (index file reference) from rightSibling to child
+		newChildren := make([]ChildPointer, len(child.Children)+1)
+		copy(newChildren, child.Children) // Copy existing child pointers
+		// Update child pointers
+		if rightSibling.Children[0].ChildNode != nil {
+			for _, child_pointer := range rightSibling.Children[0].ChildNode.Children {
+				if child_pointer.ChildNode != nil {
+					child_pointer.ChildNode.Parent = child
+				}
+			}
+		}
+		newChildren[len(child.Children)] = rightSibling.Children[0] // Append right sibling's first child pointer
+		child.Children = newChildren
+
+		// Remove the moved child pointer from rightSibling
+		newSiblingChildren := make([]ChildPointer, len(rightSibling.Children)-1)
+		copy(newSiblingChildren, rightSibling.Children[1:])
+		rightSibling.Children = newSiblingChildren
+		violation := bt.CheckInvarianceViolation()
+		if violation {
+			panic("violation happened after fillUnderflow")
+		}
+		return
+	}
+
+	// If neither sibling has extra keys, merge
+	if index > 0 {
+		bt.mergeNodes(parent, index-1)
+	} else {
+		bt.mergeNodes(parent, index)
+	}
 }
 
 func DeleteIndexFile(indexFile string) {
@@ -926,6 +974,10 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		if found {
 			node.Entries[index] = IndexEntry{Key: predecessorKey, FileOffset: predecessorOffset}
 			bt.deleteFromIndexFile(leftIndexFile, predecessorKey)
+			violation := bt.CheckInvarianceViolation()
+			if violation {
+				panic("violation happened after deleteLeafNode,1")
+			}
 			return "Success: Replaced with predecessor and deleted from index file"
 		}
 	}
@@ -936,58 +988,68 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		if found {
 			node.Entries[index] = IndexEntry{Key: successorKey, FileOffset: successorOffset}
 			bt.deleteFromIndexFile(rightIndexFile, successorKey)
+			violation := bt.CheckInvarianceViolation()
+			if violation {
+				panic("violation happened after deleteLeafNode,2")
+			}
 			return "Success: Replaced with successor and deleted from index file"
 		}
 	}
 
-	//  If neither index file had entries, check if this is the only entry
+	//  If neither index file had entries, check if this is the last entry in the node , which happens in the case of last remaining entry in root node
 	if len(node.Entries) == 1 {
-		// remove the entry and both child pointers  and delete the both left and right index file
-		node.Entries = make([]IndexEntry, 0)
-		node.Children = make([]ChildPointer, 0)
+		node.Entries = nil
+		node.Children = nil
 		os.Remove(leftIndexFile)
 		DeleteIndexFile(leftIndexFile)
 		os.Remove(rightIndexFile)
 		DeleteIndexFile(rightIndexFile)
-		// If the node also happens to be the root node
+
 		if node == bt.Root {
 			bt.currentMemoryUsage = 0
 			bt.Root = nil
 		}
-		return "Success: Root node removed, tree is empty"
+
+		if bt.CheckInvarianceViolation() {
+			panic("Violation happened after deleteLeafNode,3")
+		}
+		return "Success: Last Entry deleted, tree is empty"
 	}
 
-	//  If node has more than one entry, remove the entry and delete the left index file
+	//  If node has more than one entry, remove the entry and  the left Child Pointer and delete the index file in it
 	//estimate memory saved
 	entrySize := len(node.Entries[index].Key) + 8 // Key length + int64 offset
 	childPointerSize := 1 * 16                    // One child pointer (each ~16 bytes)
 
 	newEntries := make([]IndexEntry, len(node.Entries)-1)
-	newChildren := make([]ChildPointer, len(node.Children)-1)
-	for i := 0; i < len(node.Entries); i++ {
-		if i < index {
-			newEntries[i] = node.Entries[i]
-		}
-		if i > index {
-			newEntries[i-1] = node.Entries[i]
-		}
-	}
+	copy(newEntries, node.Entries[:index])           // Copy elements before index
+	copy(newEntries[index:], node.Entries[index+1:]) // Copy elements after index
 	node.Entries = newEntries
+
+	newChildren := make([]ChildPointer, len(node.Children)-1)
+	copy(newChildren, node.Children[:index])           // Copy elements before index
+	copy(newChildren[index:], node.Children[index+1:]) // Copy elements after index
+	node.Children = newChildren
 
 	os.Remove(leftIndexFile)
 	DeleteIndexFile(leftIndexFile)
-	for i := 0; i < len(node.Children); i++ {
-		if i < index {
-			newChildren[i] = node.Children[i]
-		}
-		if i > index {
-			newChildren[i-1] = node.Children[i]
-		}
-	}
-
-	node.Children = newChildren
 	// update memory usage
 	bt.currentMemoryUsage -= (entrySize + childPointerSize)
+
+	//  Check for underflow and handle it
+	if len(node.Entries) < bt.minEntries && node != bt.Root {
+		parent := node.Parent
+		for i, child := range parent.Children {
+			if child.ChildNode == node {
+				bt.fillUnderflow(parent, i)
+				break
+			}
+		}
+	}
+	violation := bt.CheckInvarianceViolation()
+	if violation {
+		panic("violation happened after deleteLeafNode,4")
+	}
 	return "Success: Entry removed and left index file deleted"
 }
 
@@ -1085,7 +1147,7 @@ func getMinEntryFromIndexFile(indexFile string) (string, int64, bool) {
 	return minKey, minOffset, true
 }
 
-func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int, key string) string {
+func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int) string {
 	if node.IsLeaf {
 		// Should never reach here because internal nodes are not leaves
 		return "Failed: Internal Node Entry deletion failed as node was leaf"
@@ -1095,64 +1157,38 @@ func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int, key string)
 	rightChild := node.Children[index+1].ChildNode
 
 	// Case 1.1: Left child has extra keys, replace with predecessor
-	if len(leftChild.Entries) > (bt.maxEntries / 2) {
+	if len(leftChild.Entries) >= bt.minEntries {
 		predecessor := bt.getPredecessor(leftChild)
 		node.Entries[index] = predecessor
 		//update memory usage
-		bt.currentMemoryUsage = len(predecessor.Key) - len(node.Entries[index].Key) // -deleted key + predecessory key
+		bt.currentMemoryUsage += len(predecessor.Key) - len(node.Entries[index].Key) // -deleted key + predecessory key
+		violation := bt.CheckInvarianceViolation()
+		if violation {
+			panic("violation happened after deleteInternalNodeENtry")
+		}
 		return bt.deleteRecursive(leftChild, predecessor.Key)
 	}
 
 	// Case 1.2: Right child has extra keys, replace with successor
-	if len(rightChild.Entries) > (bt.maxEntries / 2) {
+	if len(rightChild.Entries) >= bt.minEntries {
 		successor := bt.getSuccessor(rightChild)
 		node.Entries[index] = successor
 		//update memory usage
-		bt.currentMemoryUsage = len(successor.Key) - len(node.Entries[index].Key) // -deleted key + successor key
+		bt.currentMemoryUsage += len(successor.Key) - len(node.Entries[index].Key) // -deleted key + successor key
+		violation := bt.CheckInvarianceViolation()
+		if violation {
+			panic("violation happened after deleteInternalNodeENtry")
+		}
 		return bt.deleteRecursive(rightChild, successor.Key)
 	}
 
 	// Case 1.3: Merge left and right child
-	mergedNode := bt.mergeNodes(leftChild, rightChild, node.Entries[index])
-	// estimate memory saved
-	childPointerSize := 1 * 16 // One child pointer (each ~16 bytes)
-
-	// Replace leftChild with mergedNode in node.Children
-	node.Children[index].ChildNode = mergedNode
-	newEntries := make([]IndexEntry, len(node.Entries)-1)
-	newChildren := make([]ChildPointer, len(node.Children)-1)
-	var i int
-	for i = 0; i < len(node.Entries); i++ {
-		if i < index {
-			newEntries[i] = node.Entries[i]
-		}
-		// skip the key to be deleted entry from node.Entries
-		if i > index {
-			newEntries[i-1] = node.Entries[i]
-		}
+	key := node.Entries[index].Key
+	mergedNode := bt.mergeNodes(node, index)
+	violation := bt.CheckInvarianceViolation()
+	if violation {
+		panic("violation happened after deleteInternalNodeENtry")
 	}
-
-	for i = 0; i < len(node.Children); i++ {
-		if i <= index {
-			newChildren[i] = node.Children[i]
-		}
-		// skip over original rightChild node which would be at node.Children[index+1], as it has been merged with leftChild node into mergedNode
-		if i > index+1 {
-			newChildren[i-1] = node.Children[i]
-		}
-	}
-
-	node.Entries = newEntries
-	node.Children = newChildren
-
-	//update memory usage
-	bt.currentMemoryUsage -= childPointerSize
-	// If root is empty after deletion, update root
-	if len(node.Entries) == 0 && node == bt.Root {
-		bt.Root = mergedNode
-		mergedNode.Parent = nil
-	}
-
 	return bt.deleteRecursive(mergedNode, key)
 }
 
@@ -1204,53 +1240,85 @@ func (bt *BTree) deleteFromIndexFile(indexFile string, key string) string {
 	if keyFound {
 		return fmt.Sprintf("Success: Key '%s' deleted from index file", key)
 	}
-	return fmt.Sprintf("Failed: Key '%s' not found", key)
+	return fmt.Sprintf("Failed: Key '%s' not found, might be looking in the wrong index file", key)
 }
 
-func (bt *BTree) mergeNodes(left, right *BTreeNode, midEntry IndexEntry) *BTreeNode {
-	right.Parent = nil
-	mergedNodeEntries := make([]IndexEntry, len(left.Entries)+1+len(right.Entries))
-	mergedNodeChildren := make([]ChildPointer, len(left.Children)+len(right.Children))
-	var i, j int
+// Merge two children and pull down a key from parent
+func (bt *BTree) mergeNodes(parent *BTreeNode, index int) *BTreeNode {
+	left := parent.Children[index].ChildNode
+	right := parent.Children[index+1].ChildNode
 
-	for i = 0; i < len(left.Entries); i++ {
-		mergedNodeEntries[i] = left.Entries[i]
-	}
-	mergedNodeEntries[i] = midEntry
-	for j = 0; j < len(right.Entries); j++ {
-		i++
-		mergedNodeEntries[i] = right.Entries[j]
-	}
-	for i = 0; i < len(left.Children); i++ {
-		mergedNodeChildren[i] = left.Children[i]
-	}
-	for j = 0; j < len(right.Children); j++ {
-		mergedNodeChildren[i] = right.Children[j]
-		i++
-	}
+	// Merge parent entry into left
+	mergedEntries := make([]IndexEntry, len(left.Entries)+1+len(right.Entries))
+	copy(mergedEntries, left.Entries)
+	mergedEntries[len(left.Entries)] = parent.Entries[index]
+	copy(mergedEntries[len(left.Entries)+1:], right.Entries)
+
+	// Merge children
+	mergedChildren := make([]ChildPointer, len(left.Children)+len(right.Children))
+	copy(mergedChildren, left.Children)
+	copy(mergedChildren[len(left.Children):], right.Children)
 
 	mergedNode := &BTreeNode{
-		Entries:  mergedNodeEntries,
-		Children: mergedNodeChildren,
+		Entries:  mergedEntries,
+		Children: mergedChildren,
 		IsLeaf:   left.IsLeaf,
 		Parent:   left.Parent,
 	}
-	// Only update parent pointers for children that are non-nil
+
+	// Update child pointers
 	for _, child := range mergedNode.Children {
 		if child.ChildNode != nil {
 			child.ChildNode.Parent = mergedNode
 		}
 	}
 
+	// Replace leftChild with mergedNode in parent.Children
+	parent.Children[index].ChildNode = mergedNode
+
+	// Update parent by removing rightChild and its entry
+	newEntries := make([]IndexEntry, len(parent.Entries)-1)
+	copy(newEntries[:index], parent.Entries[:index])
+	copy(newEntries[index:], parent.Entries[index+1:])
+
+	newChildren := make([]ChildPointer, len(parent.Children)-1)
+	copy(newChildren[:index+1], parent.Children[:index+1])
+	copy(newChildren[index+1:], parent.Children[index+2:])
+
+	parent.Entries = newEntries
+	parent.Children = newChildren
+
+	// If parent becomes empty, update root
+	if parent == bt.Root && len(parent.Entries) == 0 {
+		bt.Root = mergedNode
+		bt.Root.Parent = nil
+	}
+
+	// If parent is now underfull, fix underflow
+	if parent != bt.Root && len(parent.Entries) < bt.minEntries {
+		if parent.Parent != nil { //  Ensure parent.Parent exists before accessing
+			grandParent := parent.Parent
+			for i, child := range grandParent.Children {
+				if child.ChildNode == parent {
+					bt.fillUnderflow(grandParent, i)
+					break
+				}
+			}
+		}
+	}
+
+	violation := bt.CheckInvarianceViolation()
+	if violation {
+		panic("violation happened after deleteInternalNodeENtry")
+	}
+
 	return mergedNode
+
 }
 
 func (bt *BTree) getPredecessor(node *BTreeNode) IndexEntry {
-	if node.IsLeaf {
-		return node.Entries[len(node.Entries)-1]
-	}
 	// Move to the rightmost child of the left subtree
-	curr := node.Children[len(node.Children)-1].ChildNode
+	curr := node
 	for !curr.IsLeaf {
 		curr = curr.Children[len(curr.Children)-1].ChildNode
 	}
@@ -1259,11 +1327,8 @@ func (bt *BTree) getPredecessor(node *BTreeNode) IndexEntry {
 }
 
 func (bt *BTree) getSuccessor(node *BTreeNode) IndexEntry {
-	if node.IsLeaf {
-		return node.Entries[0]
-	}
 	// Move to the leftmost child of the right subtree
-	curr := node.Children[0].ChildNode
+	curr := node
 	for !curr.IsLeaf {
 		curr = curr.Children[0].ChildNode
 	}
