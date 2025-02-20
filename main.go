@@ -120,8 +120,8 @@ func performanceTest(indexType string) {
 	}
 	logger := log.New(logFile, "", log.LstdFlags)
 
-	numInserts := 400
-	numOps := 400
+	numInserts := 8000
+	numOps := 8000
 	// var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
 	var insertTimes, searchTimes, deleteTimes []time.Duration
 	keys := make([]string, numInserts)
@@ -172,19 +172,6 @@ func performanceTest(indexType string) {
 	fmt.Printf("Average Search Time: %v\n", avgSearchTime)
 	logger.Printf("Average Search Time: %v\n", avgSearchTime)
 
-	// fmt.Printf("\nRunning Update Test\n")
-	// UPDATE TEST
-	// updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
-	// for i := 0; i < numOps; i++ {
-	// 	start := time.Now()
-	// 	db.Update(keys[i], randomWord())
-	// 	updateTimes = append(updateTimes, time.Since(start))
-	// 	updateBar.Add(1)
-	// }
-	// avgUpdateTime := averageTime(updateTimes)
-	// fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
-	// logger.Printf("Average Update Time: %v\n", avgUpdateTime)
-
 	fmt.Printf("\nRunning Delete Test\n")
 	// DELETE TEST
 	deleteBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Deleting"))
@@ -201,6 +188,23 @@ func performanceTest(indexType string) {
 	avgDeleteTime := averageTime(deleteTimes)
 	fmt.Printf("Average Delete Time: %v\n", avgDeleteTime)
 	logger.Printf("Average Delete Time: %v\n", avgDeleteTime)
+
+	// fmt.Printf("\nRunning Update Test\n")
+	// // UPDATE TEST
+	// updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
+	// for i := 0; i < numOps; i++ {
+	// 	start := time.Now()
+	// 	msg := db.Update(keys[i], randomWord())
+	// 	updateTimes = append(updateTimes, time.Since(start))
+	// 	if strings.HasPrefix(msg, "Failed") {
+	// 		fmt.Printf("Update failed: %s\n", msg)
+	// 		panic(msg)
+	// 	}
+	// 	updateBar.Add(1)
+	// }
+	// avgUpdateTime := averageTime(updateTimes)
+	// fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
+	// logger.Printf("Average Update Time: %v\n", avgUpdateTime)
 
 	// fmt.Printf("\nRunning Indexing Capacity Test\n")
 	// // INDEXING CAPACITY TEST
