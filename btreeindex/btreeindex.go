@@ -8,8 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 )
+
+// Global atomic counter
+var indexFileCounter uint64
 
 // Define the B-tree structure
 type BTreeNode struct {
@@ -98,8 +101,6 @@ func (bti *BTreeIndex) ClearIndex() {
 		err := os.Remove(indexFile)
 		if err != nil {
 			fmt.Printf("Warning: Failed to delete index file %s: %v\n", indexFile, err)
-		} else {
-			// fmt.Printf("Deleted index file: %s\n", indexFile)
 		}
 	}
 
@@ -110,37 +111,22 @@ func (bti *BTreeIndex) ClearIndex() {
 	bti.btree.Root = nil
 	bti.btree.currentMemoryUsage = 0
 
-	fmt.Println("B-tree index cleared and index files removed successfully.")
+	fmt.Println("\nB-tree Index cleared and removed from memory.")
 }
 
 func (bti *BTreeIndex) StopIndexing() {
 	bti.mu.Lock()
-	defer bti.mu.Unlock()
 
 	// Persist the index to disk (if needed)
 	err := bti.EncodeBTreeIndexToFile()
+	bti.mu.Unlock()
 	if err != nil {
 		fmt.Println("Warning: Failed to save index:", err)
 	} else {
 		fmt.Println("BTree Index has been encoded to string and saved to file on disk successfully.")
 	}
 	// Clear the B-tree index from memory
-	bti.btree.Root = nil
-	bti.btree = nil
-
-	// Delete all index files from disk
-	for _, filename := range indexFiles {
-		err := os.Remove(filename)
-		if err != nil {
-			fmt.Printf("Warning: Failed to delete index file %s: %v\n", filename, err)
-		} else {
-			fmt.Printf("Deleted index file: %s\n", filename)
-		}
-	}
-	// Clear the global index files array
-	indexFiles = nil
-
-	fmt.Println("BTree Index cleared and removed from memory.")
+	bti.ClearIndex()
 }
 
 // Checks if all entries in the index file are smaller than the given key.
@@ -164,11 +150,11 @@ func allEntriesAreSmallerThan(indexFile string, key string) bool {
 
 		//  If any entry is greater than or equal to the given key, return false.
 		if entryKey > key {
-			fmt.Printf("❌ Error: Entry No: [%d], Entry with key: [%s] in index file [%s] is not smaller than [%s]\n", entry_no, entryKey, indexFile, key)
+			fmt.Printf(" Error: Entry No: [%d], Entry with key: [%s] in index file [%s] is not smaller than [%s]\n", entry_no, entryKey, indexFile, key)
 			return false
 		}
 		if entryKey == key {
-			fmt.Printf("❌ Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not equal to [%s]\n", entry_no, entryKey, indexFile, key)
+			fmt.Printf(" Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not equal to [%s]\n", entry_no, entryKey, indexFile, key)
 			return false
 		}
 	}
@@ -202,11 +188,11 @@ func allEntriesAreGreaterThan(indexFile string, key string) bool {
 
 		// If any entry is smaller than or equal to the given key, return false.
 		if entryKey < key {
-			fmt.Printf("❌ Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not greater than [%s]\n", entry_no, entryKey, indexFile, key)
+			fmt.Printf(" Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not greater than [%s]\n", entry_no, entryKey, indexFile, key)
 			return false
 		}
 		if entryKey == key {
-			fmt.Printf("❌ Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not equal to [%s]\n", entry_no, entryKey, indexFile, key)
+			fmt.Printf(" Error: Entry no:[%d] ,Entry with Key [%s] in index file [%s] is not equal to [%s]\n", entry_no, entryKey, indexFile, key)
 			return false
 		}
 	}
@@ -235,7 +221,7 @@ func checkNodeInvariance(node *BTreeNode) bool {
 	// Check if entries in the current node are sorted
 	for i := 1; i < len(node.Entries); i++ {
 		if node.Entries[i-1].Key > node.Entries[i].Key {
-			fmt.Printf("❌ Error: Entries are not sorted at node level! Found [%s] > [%s]\n",
+			fmt.Printf(" Error: Entries are not sorted at node level! Found [%s] > [%s]\n",
 				node.Entries[i-1].Key, node.Entries[i].Key)
 			return true
 		}
@@ -246,7 +232,7 @@ func checkNodeInvariance(node *BTreeNode) bool {
 		if leftChildNode != nil {
 			for _, entry := range leftChildNode.Entries {
 				if entry.Key > node.Entries[i].Key {
-					fmt.Printf("❌ Error: Left child key [%s] > Parent key [%s]\n", entry.Key, node.Entries[i].Key)
+					fmt.Printf(" Error: Left child key [%s] > Parent key [%s]\n", entry.Key, node.Entries[i].Key)
 					return true
 				}
 			}
@@ -254,7 +240,7 @@ func checkNodeInvariance(node *BTreeNode) bool {
 		if rightChildNode != nil {
 			for _, entry := range rightChildNode.Entries {
 				if entry.Key < node.Entries[i].Key {
-					fmt.Printf("❌ Error: Right child key [%s] < Parent key [%s]\n", entry.Key, node.Entries[i].Key)
+					fmt.Printf(" Error: Right child key [%s] < Parent key [%s]\n", entry.Key, node.Entries[i].Key)
 					return true
 				}
 			}
@@ -265,14 +251,14 @@ func checkNodeInvariance(node *BTreeNode) bool {
 			// Read first key from leftIndexFile
 			if leftIndexFile != "" {
 				if !allEntriesAreSmallerThan(leftIndexFile, node.Entries[i].Key) {
-					fmt.Printf("❌ Error:  key in left index file > Parent key [%s]\n", node.Entries[i].Key)
+					fmt.Printf(" Error:  key in left index file > Parent key [%s]\n", node.Entries[i].Key)
 					return true
 				}
 			}
 			// Read first key from rightIndexFile
 			if rightIndexFile != "" {
 				if !allEntriesAreGreaterThan(rightIndexFile, node.Entries[i].Key) {
-					fmt.Printf("❌ Error:  key in right index file < Parent key [%s]\n", node.Entries[i].Key)
+					fmt.Printf(" Error:  key in right index file < Parent key [%s]\n", node.Entries[i].Key)
 					return true
 				}
 			}
@@ -328,16 +314,25 @@ func printNode(node *BTreeNode, level int) {
 
 // Helper function to create a new index file
 func createNewIndexFile() string {
-	// Generate a unique filename
-	indexFile := fmt.Sprintf("index_%d.db", time.Now().UnixNano())
-	// file, err := os.CreateTemp("./", indexFile)
+	// Atomically increment counter
+	counter := atomic.AddUint64(&indexFileCounter, 1)
+
+	// Generate a unique filename using both timestamp and counter
+	// indexFile := fmt.Sprintf("index_%d_%d.db", time.Now().UnixNano(), counter)
+
+	// Generate a unique filename using counter
+	indexFile := fmt.Sprintf("index_file_%d.db", counter)
+
+	// Create the file
 	file, err := os.Create(indexFile)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create index file: %v", err))
 	}
 	file.Close()
+
 	// Store the filename globally
 	indexFiles = append(indexFiles, indexFile)
+
 	return file.Name()
 }
 
@@ -423,8 +418,8 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 		bt.Root.Children[0] = ChildPointer{IndexFile: beforeIndexFile}
 		bt.Root.Children[1] = ChildPointer{IndexFile: afterIndexFile}
 		// Update memory usage
-		entrySize := len(indexEntry.Key) + 8 // Key length + int64 offset
-		childPointerSize := 2 * 16           // Two child pointers (each ~16 bytes)
+		entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset+ string overhead
+		childPointerSize := 2 * 16                // Two child pointers (each ~16 bytes)
 		bt.currentMemoryUsage += int(entrySize + childPointerSize)
 		return fmt.Sprintf("Success: Key '%s' inserted", indexEntry.Key)
 	}
@@ -452,7 +447,7 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 	return bt.insertNonFull(bt.Root, indexEntry)
 }
 
-// splitNode splits a full node into two nodes and adjusts the parent
+// splitNode splits a full node into two nodes and moves the mid element from full node to the parent
 func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string) {
 	//estimate memory usage
 	childPointerSize := 1 * 16 // One new child pointer ( ~16 bytes)
@@ -546,8 +541,11 @@ func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string) {
 	parent.Entries = newEntries
 	parent.Children = newChildren
 
-	// For propagating spliting operation upto parent if parent overflows which we are not doing as of now, unlike deletion, insertion can be forgiving of not maintaining tree balance
-	// It needs more testing , cause it did give errors a few times when tests ran.
+	/*
+		For propagating spliting operation upto parent if parent overflows which we are not doing as of now, unlike deletion, insertion can be forgiving of not maintaining tree balance
+		at all times.
+		It needs more testing.
+	*/
 
 	// if len(parent.Entries) > bt.maxEntries {
 	// 	if parent.Parent != nil {
@@ -592,8 +590,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 			// Check if we have enough keys already
 			if len(node.Entries) <= bt.maxEntries { // Assuming max of 5 keys per node before splitting
 				//estimate memory usage
-				entrySize := len(indexEntry.Key) + 8 // Key length + int64 offset
-				childPointerSize := 1 * 16           // One child pointer (each ~16 bytes)
+				entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
+				childPointerSize := 1 * 16                // One child pointer (each ~16 bytes)
 				if bt.currentMemoryUsage+entrySize+childPointerSize > MaxMemoryUsage {
 					return "Failed: Memory limit exceeded"
 				}
@@ -947,7 +945,7 @@ func (bt *BTree) deleteRecursive(node *BTreeNode, key string) string {
 	return bt.deleteRecursive(node.Children[i].ChildNode, key)
 }
 
-// Increases the number of entries in parent's Children[index].ChildNode , either by borrowing one from left or right sibling if possible , by merging if not.
+// Increases the number of entries in a node with less than min entries by 1
 func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 	child := parent.Children[index].ChildNode
 
@@ -967,7 +965,7 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 		copy(newSiblingEntries, leftSibling.Entries[:len(leftSibling.Entries)-1])
 		leftSibling.Entries = newSiblingEntries
 
-		// 🔹 Move last child pointer (index file reference) from leftSibling to child
+		// Move last child pointer (index file reference) from leftSibling to child
 		newChildren := make([]ChildPointer, len(child.Children)+1)
 		// Update child pointers
 		if leftSibling.Children[len(leftSibling.Children)-1].ChildNode != nil {
@@ -1006,7 +1004,7 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 		copy(newSiblingEntries, rightSibling.Entries[1:])
 		rightSibling.Entries = newSiblingEntries
 
-		// 🔹 Move first child pointer (index file reference) from rightSibling to child
+		// Move first child pointer (index file reference) from rightSibling to child
 		newChildren := make([]ChildPointer, len(child.Children)+1)
 		copy(newChildren, child.Children) // Copy existing child pointers
 		// Update child pointers
@@ -1103,9 +1101,10 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 	}
 
 	//  If node has more than one entry, remove the entry and  the left Child Pointer and delete the index file in it
+
 	//estimate memory saved
-	entrySize := len(node.Entries[index].Key) + 8 // Key length + int64 offset
-	childPointerSize := 1 * 16                    // One child pointer (each ~16 bytes)
+	entrySize := len(node.Entries[index].Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
+	childPointerSize := 1 * 16                         // One child pointer (each ~16 bytes)
 
 	newEntries := make([]IndexEntry, len(node.Entries)-1)
 	copy(newEntries, node.Entries[:index])           // Copy elements before index
@@ -1314,11 +1313,13 @@ func (bt *BTree) deleteFromIndexFile(indexFile string, key string) string {
 	return fmt.Sprintf("Failed: Key '%s' not found, might be looking in the wrong index file", key)
 }
 
-// Merge parent node's Children[index].Childnode (left Child) and Children[index+1].Childnode and pull down parent's Entries[Index] down to merged node
+// Merge a parent node's two children and move a parent's entry down to merged node
 func (bt *BTree) mergeNodes(parent *BTreeNode, index int) *BTreeNode {
 	left := parent.Children[index].ChildNode
 	right := parent.Children[index+1].ChildNode
 
+	//estimate memory saved
+	childPointerSize := 1 * 16 // One child pointer (each ~16 bytes)
 	// Merge parent entry into left
 	mergedEntries := make([]IndexEntry, len(left.Entries)+1+len(right.Entries))
 	copy(mergedEntries, left.Entries)
@@ -1359,6 +1360,8 @@ func (bt *BTree) mergeNodes(parent *BTreeNode, index int) *BTreeNode {
 	parent.Entries = newEntries
 	parent.Children = newChildren
 
+	// update memory usage
+	bt.currentMemoryUsage -= childPointerSize
 	// If parent becomes empty, update root
 	if parent == bt.Root && len(parent.Entries) == 0 {
 		bt.Root = mergedNode
@@ -1480,7 +1483,7 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 							}
 							entries = append([]IndexEntry{{Key: parts[0], FileOffset: offset}}, entries...)
 							// update memory usage
-							entrySize := len(parts[0]) + 8 // 8 bytes for offset
+							entrySize := len(parts[0]) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
 							memoryUsage += entrySize
 						}
 					}

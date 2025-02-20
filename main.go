@@ -11,8 +11,9 @@ import (
 
 	"database_indexing/btreeindex"
 	"database_indexing/database"
-	"database_indexing/hashindex" // Import the HashIndex package
+	"database_indexing/hashindex"
 
+	"github.com/briandowns/spinner"
 	"github.com/joho/godotenv"
 	"github.com/schollz/progressbar/v3"
 )
@@ -43,10 +44,10 @@ func loadEnv(dbType string) (string, string) {
 	return dataFile, indexFile
 }
 
-// Generate a random 6-letter word
+// Generate a random 8-letter word
 func randomWord() string {
 	letters := []rune("abcdefghijklmnopqrstuvwxyz")
-	word := make([]rune, 6)
+	word := make([]rune, 8)
 	for i := range word {
 		word[i] = letters[rand.Intn(len(letters))]
 	}
@@ -120,15 +121,18 @@ func performanceTest(indexType string) {
 	}
 	logger := log.New(logFile, "", log.LstdFlags)
 
-	numInserts := 8000
-	numOps := 8000
-	// var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
-	var insertTimes, searchTimes, deleteTimes []time.Duration
+	logger.Println("=======================================")
+	logger.Printf("     TEST RESULTS FOR %s INDEXING      ", strings.ToUpper(indexType))
+	logger.Println("=======================================")
+
+	numInserts := 2000
+	numOps := 400
+	var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
 	keys := make([]string, numInserts)
 	keyValueMap := make(map[string]string) // Store key-value pairs for validation
-	fmt.Printf("\nRunning Insert Test\n")
 
 	// INSERT TEST
+	fmt.Printf("\nRunning Insert Test\n")
 	insertBar := progressbar.NewOptions(numInserts, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Inserting"))
 	for i := 0; i < numInserts; i++ {
 		key := randomWord() // Generate random key
@@ -150,8 +154,8 @@ func performanceTest(indexType string) {
 	fmt.Printf("Average Insert Time: %v\n", avgInsertTime)
 	logger.Printf("Average Insert Time: %v\n", avgInsertTime)
 
-	fmt.Printf("\nRunning Search Test\n")
 	// SEARCH TEST
+	fmt.Printf("\nRunning Search Test\n")
 	searchBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Searching"))
 	rand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
 	for i := 0; i < numOps; i++ {
@@ -172,8 +176,25 @@ func performanceTest(indexType string) {
 	fmt.Printf("Average Search Time: %v\n", avgSearchTime)
 	logger.Printf("Average Search Time: %v\n", avgSearchTime)
 
-	fmt.Printf("\nRunning Delete Test\n")
+	// UPDATE TEST
+	fmt.Printf("\nRunning Update Test\n")
+	updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
+	for i := 0; i < numOps; i++ {
+		start := time.Now()
+		msg := db.Update(keys[i], randomWord())
+		updateTimes = append(updateTimes, time.Since(start))
+		if strings.HasPrefix(msg, "Failed") {
+			fmt.Printf("Update failed: %s\n", msg)
+			panic(msg)
+		}
+		updateBar.Add(1)
+	}
+	avgUpdateTime := averageTime(updateTimes)
+	fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
+	logger.Printf("Average Update Time: %v\n", avgUpdateTime)
+
 	// DELETE TEST
+	fmt.Printf("\nRunning Delete Test\n")
 	deleteBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Deleting"))
 	for i := 0; i < numOps; i++ {
 		start := time.Now()
@@ -189,56 +210,41 @@ func performanceTest(indexType string) {
 	fmt.Printf("Average Delete Time: %v\n", avgDeleteTime)
 	logger.Printf("Average Delete Time: %v\n", avgDeleteTime)
 
-	// fmt.Printf("\nRunning Update Test\n")
-	// // UPDATE TEST
-	// updateBar := progressbar.NewOptions(numOps, progressbar.OptionSetWriter(os.Stderr), progressbar.OptionSetDescription("Updating"))
-	// for i := 0; i < numOps; i++ {
-	// 	start := time.Now()
-	// 	msg := db.Update(keys[i], randomWord())
-	// 	updateTimes = append(updateTimes, time.Since(start))
-	// 	if strings.HasPrefix(msg, "Failed") {
-	// 		fmt.Printf("Update failed: %s\n", msg)
-	// 		panic(msg)
-	// 	}
-	// 	updateBar.Add(1)
-	// }
-	// avgUpdateTime := averageTime(updateTimes)
-	// fmt.Printf("Average Update Time: %v\n", avgUpdateTime)
-	// logger.Printf("Average Update Time: %v\n", avgUpdateTime)
+	// INDEXING CAPACITY TEST
+	fmt.Printf("\nRunning Indexing Capacity Test\n")
+	db.ClearIndex()
+	clearDbFiles(tempDataFile, tempIndexFile)
+	count := 0
+	// Initialize the spinner with a rotating effect
+	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Use character set 14 with 100ms update speed
+	s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
+	s.Start()
+	for {
+		key := randomWord()
+		value := randomWord()
 
-	// fmt.Printf("\nRunning Indexing Capacity Test\n")
-	// // INDEXING CAPACITY TEST
-	// db.ClearIndex()
-	// clearDbFiles(tempDataFile, tempIndexFile)
-	// count := 0
-	// // Initialize the spinner with a rotating effect
-	// s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Use character set 14 with 100ms update speed
-	// s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
-	// s.Start()
-	// for {
-	// 	key := randomWord()
-	// 	value := randomWord()
+		// Try inserting
+		result := db.Insert(key, value)
 
-	// 	// Try inserting
-	// 	result := db.Insert(key, value)
-
-	// 	// Stop if memory limit is hit
-	// 	if strings.Contains(result, "Failed: Memory limit exceeded") {
-	// 		s.Stop()
-	// 		fmt.Print("\r✔ ") // Overwrite spinner with a final completion checkmark
-	// 		fmt.Printf("Indexing capacity: %d entries indexed in %.2f MB memory\n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
-	// 		logger.Printf("Indexing capacity : %d entries indexed in %.2f MB memory \n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
-	// 		break
-	// 	}
-
-	// 	count++
-	// 	s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
-	// }
+		// Stop if memory limit is hit
+		if strings.Contains(result, "Failed: Memory limit exceeded") {
+			s.Stop()
+			fmt.Print("\r✔ ") // Overwrite spinner with a final completion checkmark
+			fmt.Printf("Indexing capacity: %d entries indexed in %.2f MB memory\n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
+			logger.Printf("Indexing capacity : %d entries indexed in %.2f MB memory \n", count, float64(db.GetMaxMemoryUsage())/(1024*1024))
+			break
+		}
+		if strings.HasPrefix(result, "Failed") && !strings.Contains(result, "Failed: Memory limit exceeded") {
+			continue
+		}
+		count++
+		s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
+	}
 	// Clean up: Remove the temporary database files
-	// db.ClearIndex()
+	db.ClearIndex()
 	os.Remove(tempDataFile)
 	os.Remove(tempIndexFile)
-	// time.Sleep(1 * time.Second)
+	time.Sleep(1 * time.Second)
 	fmt.Println("\nPerformance test completed. Results saved to test_logs.log")
 
 }
@@ -271,20 +277,19 @@ func main() {
 		// Load file paths from .env
 		dataFile, indexFile := loadEnv(indexType)
 		db = hashindex.NewHashIndex(dataFile, indexFile)
-		fmt.Println("Using Hash Index Database")
+		fmt.Println("Using Hash Indexed Database")
 
 	case "btree":
 		// Load file paths from .env
 		dataFile, encodedBTreeIndexFile := loadEnv(indexType)
 		db = btreeindex.NewBTreeIndex(dataFile, encodedBTreeIndexFile)
-		fmt.Println("Using BTree Index Database")
+		fmt.Println("Using BTree Indexed Database")
 
 	default:
 		fmt.Println("Invalid index type. Use 'hash' or 'btree'")
 		return
 	}
 
-	fmt.Println("Simple Database CLI")
 	fmt.Println("Commands: insert <key> <value> | search <key> | delete <key> | update <key> <value> | run_performance_test | exit")
 
 	reader := bufio.NewReader(os.Stdin)

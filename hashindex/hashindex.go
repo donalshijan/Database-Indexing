@@ -39,19 +39,18 @@ func (hi *HashIndex) StopIndexing() {
 	defer hi.mu.Unlock()
 
 	// Persist the index to disk (if needed)
-	// err := hi.saveIndex()
-	// if err != nil {
-	// 	fmt.Println("Warning: Failed to save index:", err)
-	// } else {
-	// 	fmt.Println("Index file saved to disk successfully.")
-	// }
+	err := hi.saveIndex()
+	if err != nil {
+		fmt.Println("Warning: Failed to save index:", err)
+	} else {
+		fmt.Println("Index file saved to disk successfully.")
+	}
 	// Clear the index map to free memory
-	hi.index = nil
-
+	hi.ClearIndex()
 	fmt.Println("HashIndex cleared and removed from memory.")
 }
 
-// saveIndex persists the in-memory index to the index file
+// Save Index persists the in-memory index to the index file
 func (hi *HashIndex) saveIndex() error {
 	file, err := os.Create(hi.indexFile) // Overwrite the existing file
 	if err != nil {
@@ -72,7 +71,9 @@ func (hi *HashIndex) saveIndex() error {
 
 // Estimate memory usage of a key-value pair
 func estimateEntrySize(key string) int {
-	return len(key) + 8 + 16 // key size + int64 (8 bytes) + map overhead (16 bytes approx)
+	// string struct object can use 8 bytes for pointer and 8 bytes for length
+	// Assuming each bucket in the hashtable can have upto 8 entries and a bucket has an overhead of 64 bytes, sharing that with 8 entries we estimate that each entry contributes 8 bytes of bucket overhead
+	return len(key) + 16 + 8 + 8 // key size + string overhead (16 bytes) + offset(int64) (8 bytes) + estimated map's bucket overhead (8 bytes approx)
 }
 
 func (hi *HashIndex) loadIndex() {
@@ -109,6 +110,7 @@ func (hi *HashIndex) loadIndex() {
 
 func (hi *HashIndex) ClearIndex() {
 	hi.index = make(map[string]int64)
+	hi.currentMemoryUsage = 0
 }
 
 func (hi *HashIndex) Insert(key, value string) string {
