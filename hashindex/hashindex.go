@@ -10,10 +10,14 @@ import (
 	"sync"
 )
 
-const MaxMemoryUsage = 1024 * 1024 // 1MB in bytes
+const MaxMemoryUsage = 102400 // bytes (102400 = 100KB ~= 0.1MB)
 
 func (hi *HashIndex) GetMaxMemoryUsage() int64 {
 	return MaxMemoryUsage
+}
+
+func (hi *HashIndex) GetCurrentMemoryUsage() int64 {
+	return int64(hi.currentMemoryUsage)
 }
 
 type HashIndex struct {
@@ -47,7 +51,6 @@ func (hi *HashIndex) StopIndexing() {
 	}
 	// Clear the index map to free memory
 	hi.ClearIndex()
-	fmt.Println("HashIndex cleared and removed from memory.")
 }
 
 // Save Index persists the in-memory index to the index file
@@ -111,6 +114,7 @@ func (hi *HashIndex) loadIndex() {
 func (hi *HashIndex) ClearIndex() {
 	hi.index = make(map[string]int64)
 	hi.currentMemoryUsage = 0
+	fmt.Println("\nHash Index cleared.")
 }
 
 func (hi *HashIndex) Insert(key, value string) string {

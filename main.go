@@ -28,11 +28,11 @@ func loadEnv(dbType string) (string, string) {
 
 	var indexFile string
 	if dbType == "btree" {
-		dataFile = os.Getenv("BTREE_DATA_FILE")
-		indexFile = os.Getenv("ENCODED_BTREE_INDEX_FILE")
+		dataFile = os.Getenv("BTREE_INDEXED_DB_DATA_FILE")
+		indexFile = os.Getenv("BTREE_INDEXED_DB_ENCODED_BTREE_INDEX_FILE")
 	} else if dbType == "hash" {
-		dataFile = os.Getenv("DATA_FILE")
-		indexFile = os.Getenv("INDEX_FILE")
+		dataFile = os.Getenv("HASH_INDEXED_DB_DATA_FILE")
+		indexFile = os.Getenv("HASH_INDEXED_DB_INDEX_FILE")
 	} else {
 		log.Fatal("Invalid database type. Use 'hash' or 'btree'")
 	}
@@ -126,7 +126,7 @@ func performanceTest(indexType string) {
 	logger.Println("=======================================")
 
 	numInserts := 2000
-	numOps := 400
+	numOps := 2000
 	var insertTimes, searchTimes, updateTimes, deleteTimes []time.Duration
 	keys := make([]string, numInserts)
 	keyValueMap := make(map[string]string) // Store key-value pairs for validation
@@ -142,8 +142,12 @@ func performanceTest(indexType string) {
 		insertTimes = append(insertTimes, time.Since(start))
 		keys[i] = key
 		keyValueMap[key] = value // Store key-value pair
-		// Print status for insertion
+
 		if strings.HasPrefix(msg, "Failed") {
+			// Clean up: Remove the temporary database files before panicking
+			db.ClearIndex()
+			os.Remove(tempDataFile)
+			os.Remove(tempIndexFile)
 			fmt.Printf("Insert failed: %s\n", msg)
 			panic(msg)
 		}
@@ -184,6 +188,10 @@ func performanceTest(indexType string) {
 		msg := db.Update(keys[i], randomWord())
 		updateTimes = append(updateTimes, time.Since(start))
 		if strings.HasPrefix(msg, "Failed") {
+			// Clean up: Remove the temporary database files before panicking
+			db.ClearIndex()
+			os.Remove(tempDataFile)
+			os.Remove(tempIndexFile)
 			fmt.Printf("Update failed: %s\n", msg)
 			panic(msg)
 		}
@@ -201,6 +209,10 @@ func performanceTest(indexType string) {
 		msg := db.Delete(keys[i])
 		deleteTimes = append(deleteTimes, time.Since(start))
 		if strings.HasPrefix(msg, "Failed") {
+			// Clean up: Remove the temporary database files before panicking
+			db.ClearIndex()
+			os.Remove(tempDataFile)
+			os.Remove(tempIndexFile)
 			fmt.Printf("Delete failed: %s\n", msg)
 			panic(msg)
 		}
@@ -212,8 +224,10 @@ func performanceTest(indexType string) {
 
 	// INDEXING CAPACITY TEST
 	fmt.Printf("\nRunning Indexing Capacity Test\n")
+	fmt.Print("Clearing test DB Index and reinitializing to run indexing capacity test.")
 	db.ClearIndex()
 	clearDbFiles(tempDataFile, tempIndexFile)
+	fmt.Println("Cleared test DB Index to run indexing capacity test.")
 	count := 0
 	// Initialize the spinner with a rotating effect
 	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Use character set 14 with 100ms update speed
@@ -241,6 +255,7 @@ func performanceTest(indexType string) {
 		s.Suffix = fmt.Sprintf("  Entries Indexed: %d", count)
 	}
 	// Clean up: Remove the temporary database files
+	fmt.Print("\nClearing test DB Index.")
 	db.ClearIndex()
 	os.Remove(tempDataFile)
 	os.Remove(tempIndexFile)

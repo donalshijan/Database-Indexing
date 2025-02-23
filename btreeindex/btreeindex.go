@@ -2,6 +2,7 @@ package btreeindex
 
 import (
 	"bufio"
+	"container/heap"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,11 @@ import (
 
 // Global atomic counter
 var indexFileCounter uint64
+
+type IndexEntry struct {
+	Key        string
+	FileOffset int64 // Offset in the file for this node
+}
 
 // Define the B-tree structure
 type BTreeNode struct {
@@ -29,15 +35,13 @@ type ChildPointer struct {
 
 // Define the B-tree structure
 type BTree struct {
-	Root               *BTreeNode
-	currentMemoryUsage int
-	maxEntries         int
-	minEntries         int
+	Root                                *BTreeNode
+	currentMemoryUsage                  int
+	maxEntries                          int
+	minEntries                          int
+	indexFileToStoreInternalNodeEntries string
 }
-type IndexEntry struct {
-	Key        string
-	FileOffset int64 // Offset in the file for this node
-}
+
 type BTreeIndex struct {
 	dataFile              string
 	encodedBTreeIndexFile string
@@ -47,10 +51,46 @@ type BTreeIndex struct {
 
 var indexFiles []string
 
-const MaxMemoryUsage = 1024 * 1024 // 1MB in bytes
+const MaxMemoryUsage = 102400 // bytes (102400 = 100KB ~= 0.1MB)
 
 func (bti *BTreeIndex) GetMaxMemoryUsage() int64 {
 	return MaxMemoryUsage
+}
+
+func (bti *BTreeIndex) GetCurrentMemoryUsage() int64 {
+	return int64(bti.btree.currentMemoryUsage)
+}
+
+type MinHeap []IndexEntry
+
+func (h MinHeap) Len() int           { return len(h) }
+func (h MinHeap) Less(i, j int) bool { return h[i].Key < h[j].Key }
+func (h MinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *MinHeap) Push(x interface{}) {
+	*h = append(*h, x.(IndexEntry))
+}
+func (h *MinHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+type MaxHeap []IndexEntry
+
+func (h MaxHeap) Len() int           { return len(h) }
+func (h MaxHeap) Less(i, j int) bool { return h[i].Key > h[j].Key } // Reverse order for max heap
+func (h MaxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *MaxHeap) Push(x interface{}) {
+	*h = append(*h, x.(IndexEntry))
+}
+func (h *MaxHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
 }
 
 func NewBTreeIndex(dataFilename, encodedBTreeIndexFileFilename string) *BTreeIndex {
@@ -85,10 +125,11 @@ func (btreeIndex *BTreeIndex) loadIndex() {
 func NewBTree() (*BTree, error) {
 	branching_factor := 16
 	return &BTree{
-		Root:               nil, // The root is initially set to nil
-		currentMemoryUsage: 0,
-		maxEntries:         2*branching_factor - 1,
-		minEntries:         branching_factor - 1,
+		Root:                                nil, // The root is initially set to nil
+		currentMemoryUsage:                  0,
+		maxEntries:                          2*branching_factor - 1,
+		minEntries:                          branching_factor - 1,
+		indexFileToStoreInternalNodeEntries: createNewIndexFile(),
 	}, nil
 }
 
@@ -111,7 +152,7 @@ func (bti *BTreeIndex) ClearIndex() {
 	bti.btree.Root = nil
 	bti.btree.currentMemoryUsage = 0
 
-	fmt.Println("\nB-tree Index cleared and removed from memory.")
+	fmt.Println("\nB-tree Index cleared.")
 }
 
 func (bti *BTreeIndex) StopIndexing() {
@@ -361,12 +402,166 @@ func appendToIndexFile(indexFile string, indexEntry IndexEntry, checkIfEntryAlre
 			return fmt.Sprintf("Failed: Error reading index file: %v", err)
 		}
 	}
+	file.Seek(0, io.SeekEnd) // Move file pointer to the end before writing
 	// Append the key and offset to the file
 	_, err = file.WriteString(fmt.Sprintf("%s:%d\n", indexEntry.Key, indexEntry.FileOffset))
 	if err != nil {
 		return fmt.Sprintf("Failed: Could not write to index file: %v", err)
 	}
 
+	return fmt.Sprintf("Success: Key '%s' added to index file", indexEntry.Key)
+}
+
+func writeEntriesToFile(filename string, h heap.Interface) bool {
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
+	defer file.Close()
+	if err != nil {
+		return false
+	}
+
+	for h.Len() > 0 {
+		entry := heap.Pop(h).(IndexEntry)
+		file.Seek(0, io.SeekEnd)
+		_, err := file.WriteString(fmt.Sprintf("%s:%d\n", entry.Key, entry.FileOffset))
+		if err != nil {
+			return false
+		}
+	}
+
+	file.Sync()
+
+	return true
+}
+
+func (bt *BTree) appendToIndexFileAndHandleIndexFileOverflow(indexFile string, indexEntry IndexEntry, leafNode *BTreeNode, indexOfChildPointerContainingIndexFile int) string {
+	// Open the index file in read+write mode (to check for duplicate keys)
+	file, err := os.OpenFile(indexFile, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Sprintf("Failed: Could not open index file: %v", err)
+	}
+	defer file.Close()
+
+	maxHeap := &MaxHeap{}
+	minHeap := &MinHeap{}
+	*maxHeap = make(MaxHeap, 0)
+	*minHeap = make(MinHeap, 0)
+	heap.Init(maxHeap)
+	heap.Init(minHeap)
+
+	// Reset cursor to the beginning before scanning
+	file.Seek(0, 0)
+	number_of_entries := 0
+	// Check if the key already exists in the file
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue // Skip malformed lines
+		}
+		number_of_entries++
+		if parts[0] == indexEntry.Key {
+			*maxHeap = (*maxHeap)[:0] // Clear maxHeap
+			*minHeap = (*minHeap)[:0] // Clear minHeap
+			return fmt.Sprintf("Failed: Key '%s' already exists in index file", indexEntry.Key)
+		}
+
+		offset, _ := strconv.ParseInt(parts[1], 10, 64)
+		entry := IndexEntry{Key: parts[0], FileOffset: offset}
+
+		heap.Push(maxHeap, entry)
+		if minHeap.Len() > 0 && (*maxHeap)[0].Key > (*minHeap)[0].Key {
+			heap.Push(minHeap, heap.Pop(maxHeap))
+		}
+
+		if maxHeap.Len() > minHeap.Len()+1 {
+			heap.Push(minHeap, heap.Pop(maxHeap))
+		}
+		if minHeap.Len() > maxHeap.Len()+1 {
+			heap.Push(maxHeap, heap.Pop(minHeap))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		*maxHeap = (*maxHeap)[:0] // Clear maxHeap
+		*minHeap = (*minHeap)[:0] // Clear minHeap
+		return fmt.Sprintf("Failed: Error reading index file: %v", err)
+	}
+
+	file.Seek(0, io.SeekEnd) // Move file pointer to the end before writing
+	// Append the key and offset to the file
+	_, err = file.WriteString(fmt.Sprintf("%s:%d\n", indexEntry.Key, indexEntry.FileOffset))
+	if err != nil {
+		*maxHeap = (*maxHeap)[:0] // Clear maxHeap
+		*minHeap = (*minHeap)[:0] // Clear minHeap
+		return fmt.Sprintf("Failed: Could not write to index file: %v", err)
+	}
+
+	heap.Push(maxHeap, indexEntry)
+	if minHeap.Len() > 0 && (*maxHeap)[0].Key > (*minHeap)[0].Key {
+		heap.Push(minHeap, heap.Pop(maxHeap))
+	}
+
+	if maxHeap.Len() > minHeap.Len()+1 {
+		heap.Push(minHeap, heap.Pop(maxHeap))
+	}
+	if minHeap.Len() > maxHeap.Len()+1 {
+		heap.Push(maxHeap, heap.Pop(minHeap))
+	}
+
+	// If index file had max entries before adding this entry, it should overflow by now since we added one more, so we split this overflowing indexfile
+	if number_of_entries >= 10*bt.maxEntries {
+		var medianEntry IndexEntry
+		if number_of_entries%2 != 0 {
+			if maxHeap.Len() > minHeap.Len() {
+				medianEntry = heap.Pop(maxHeap).(IndexEntry)
+			} else {
+				medianEntry = heap.Pop(minHeap).(IndexEntry)
+			}
+		} else {
+			medianEntry = heap.Pop(maxHeap).(IndexEntry)
+		}
+
+		// Update memory usage
+		entrySize := len(medianEntry.Key) + 8 + 16 // Key length + int64 offset+ string overhead
+		childPointerSize := 1 * 16                 // one new child pointers (each ~16 bytes)
+
+		indexFileForKeyEntriesSmallerThanMedian := createNewIndexFile()
+		indexFileForKeyEntriesGreaterThanMedian := createNewIndexFile()
+
+		successfullyCreatedIndexFileEntriesForSmallerHalf := writeEntriesToFile(indexFileForKeyEntriesSmallerThanMedian, maxHeap)
+		successfullyCreatedIndexFileEntriesForGreaterHalf := writeEntriesToFile(indexFileForKeyEntriesGreaterThanMedian, minHeap)
+
+		if !successfullyCreatedIndexFileEntriesForSmallerHalf || !successfullyCreatedIndexFileEntriesForGreaterHalf {
+			*maxHeap = (*maxHeap)[:0] // Clear maxHeap
+			*minHeap = (*minHeap)[:0] // Clear minHeap
+			return fmt.Sprintf("Failed: Error occured while splitting index file ")
+		}
+
+		// insert median into leaf node and update child pointers to point to these new index files
+		newLeafNodeEntries := make([]IndexEntry, len(leafNode.Entries)+1)
+
+		copy(newLeafNodeEntries[:indexOfChildPointerContainingIndexFile], leafNode.Entries[:indexOfChildPointerContainingIndexFile])
+		newLeafNodeEntries[indexOfChildPointerContainingIndexFile] = medianEntry
+		copy(newLeafNodeEntries[indexOfChildPointerContainingIndexFile+1:], leafNode.Entries[indexOfChildPointerContainingIndexFile:])
+		leafNode.Entries = newLeafNodeEntries
+
+		newLeafNodeChildrenEntries := make([]ChildPointer, len(leafNode.Children)+1)
+		copy(newLeafNodeChildrenEntries[:indexOfChildPointerContainingIndexFile], leafNode.Children[:indexOfChildPointerContainingIndexFile])
+		newLeafNodeChildrenEntries[indexOfChildPointerContainingIndexFile] = ChildPointer{ChildNode: nil, IndexFile: indexFileForKeyEntriesSmallerThanMedian}
+		newLeafNodeChildrenEntries[indexOfChildPointerContainingIndexFile+1] = ChildPointer{ChildNode: nil, IndexFile: indexFileForKeyEntriesGreaterThanMedian}
+		copy(newLeafNodeChildrenEntries[indexOfChildPointerContainingIndexFile+2:], leafNode.Children[indexOfChildPointerContainingIndexFile+1:])
+		leafNode.Children = newLeafNodeChildrenEntries
+
+		appendToIndexFile(bt.indexFileToStoreInternalNodeEntries, medianEntry, false)
+		//update memory usage
+		bt.currentMemoryUsage += int(entrySize + childPointerSize)
+
+		os.Remove(indexFile)
+		DeleteIndexFile(indexFile)
+	}
+
+	*maxHeap = (*maxHeap)[:0] // Clear maxHeap
+	*minHeap = (*minHeap)[:0] // Clear minHeap
 	return fmt.Sprintf("Success: Key '%s' added to index file", indexEntry.Key)
 }
 
@@ -410,6 +605,7 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 			Parent:   nil,
 		}
 
+		appendToIndexFile(bt.indexFileToStoreInternalNodeEntries, indexEntry, false)
 		// Create two new index files for before and after the key
 		beforeIndexFile := createNewIndexFile()
 		afterIndexFile := createNewIndexFile()
@@ -588,7 +784,7 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 		// Case 1: If the key is out of bounds (before first or after last key)
 		if i == 0 || i == len(node.Entries) {
 			// Check if we have enough keys already
-			if len(node.Entries) <= bt.maxEntries { // Assuming max of 5 keys per node before splitting
+			if len(node.Entries) <= bt.maxEntries { // Assuming max of maxEntries keys per node before splitting
 				//estimate memory usage
 				entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
 				childPointerSize := 1 * 16                // One child pointer (each ~16 bytes)
@@ -602,7 +798,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						smallestKey, _, found := getMinEntryFromIndexFile(indexFile)
 						if found && indexEntry.Key > smallestKey {
 							// Append to index file instead
-							return appendToIndexFile(indexFile, indexEntry, true)
+							// return appendToIndexFile(indexFile, indexEntry, true)
+							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
 					}
 					// Manually inserting `indexEntry` at the beginning of `node.Entries`
@@ -611,6 +808,7 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 
 					// Insert the new entry at the beginning
 					newEntries[0] = indexEntry
+					appendToIndexFile(bt.indexFileToStoreInternalNodeEntries, indexEntry, false)
 
 					// Copy the existing entries to their new position
 					for i := 0; i < len(node.Entries); i++ {
@@ -637,7 +835,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						largestKey, _, found := getMaxEntryFromIndexFile(indexFile)
 						if found && indexEntry.Key < largestKey {
 							// Append to index file instead
-							return appendToIndexFile(indexFile, indexEntry, true)
+							// return appendToIndexFile(indexFile, indexEntry, true)
+							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
 					}
 					// Manually inserting `indexEntry` at the end of `node.Entries`
@@ -650,6 +849,7 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 					}
 					// Insert the new entry at the end
 					newEntries[len(newEntries)-1] = indexEntry
+					appendToIndexFile(bt.indexFileToStoreInternalNodeEntries, indexEntry, false)
 
 					// Copy existing children
 					for i := 0; i < len(node.Children); i++ {
@@ -674,7 +874,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 		// Case 2: Look up the respective index file and append the entry
 		indexFile := node.Children[i].IndexFile
 
-		return appendToIndexFile(indexFile, indexEntry, true)
+		// return appendToIndexFile(indexFile, indexEntry, true)
+		return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 	}
 
 	// Case 3: Insert into an internal node
@@ -901,7 +1102,11 @@ func (bti *BTreeIndex) Delete(key string) string {
 }
 
 func (bti *BTreeIndex) Update(key string, value string) string {
-	bti.Delete(key)
+
+	msg := bti.Delete(key)
+	if strings.HasPrefix(msg, "Failed") {
+		return fmt.Sprintf("Failed: Delete failed with message:%s", msg)
+	}
 	return bti.Insert(key, value)
 }
 func (bt *BTree) delete(key string) string {
@@ -925,7 +1130,7 @@ func (bt *BTree) deleteRecursive(node *BTreeNode, key string) string {
 			return bt.deleteLeafNodeEntry(node, i)
 		}
 		// If key is not in the node, search in the corresponding index file
-		return bt.deleteFromIndexFile(node.Children[i].IndexFile, key)
+		return deleteFromIndexFile(node.Children[i].IndexFile, key)
 	}
 
 	// Case 2: If the node is an INTERNAL NODE
@@ -1060,14 +1265,14 @@ func DeleteIndexFile(indexFile string) {
 func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 	leftIndexFile := node.Children[index].IndexFile
 	rightIndexFile := node.Children[index+1].IndexFile
-
+	originalEntry := node.Entries[index]
 	// Try replacing with the predecessor from left index file
 	if leftIndexFile != "" {
 		predecessorKey, predecessorOffset, found := getMaxEntryFromIndexFile(leftIndexFile)
 		if found {
 			node.Entries[index] = IndexEntry{Key: predecessorKey, FileOffset: predecessorOffset}
-			bt.deleteFromIndexFile(leftIndexFile, predecessorKey)
-
+			deleteFromIndexFile(leftIndexFile, predecessorKey)
+			deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 			return "Success: Replaced with predecessor and deleted from index file"
 		}
 	}
@@ -1077,8 +1282,8 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		successorKey, successorOffset, found := getMinEntryFromIndexFile(rightIndexFile)
 		if found {
 			node.Entries[index] = IndexEntry{Key: successorKey, FileOffset: successorOffset}
-			bt.deleteFromIndexFile(rightIndexFile, successorKey)
-
+			deleteFromIndexFile(rightIndexFile, successorKey)
+			deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 			return "Success: Replaced with successor and deleted from index file"
 		}
 	}
@@ -1087,6 +1292,7 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 	if len(node.Entries) == 1 {
 		node.Entries = nil
 		node.Children = nil
+
 		os.Remove(leftIndexFile)
 		DeleteIndexFile(leftIndexFile)
 		os.Remove(rightIndexFile)
@@ -1096,7 +1302,7 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 			bt.currentMemoryUsage = 0
 			bt.Root = nil
 		}
-
+		deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 		return "Success: Last Entry deleted, tree is empty"
 	}
 
@@ -1132,6 +1338,7 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		}
 	}
 
+	deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 	return "Success: Entry removed and left index file deleted"
 }
 
@@ -1237,13 +1444,14 @@ func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int) string {
 
 	leftChild := node.Children[index].ChildNode
 	rightChild := node.Children[index+1].ChildNode
-
+	originalEntry := node.Entries[index]
 	// Case 1.1: Left child has extra keys, replace with predecessor
 	if len(leftChild.Entries) >= bt.minEntries {
 		predecessor := bt.getPredecessor(leftChild)
 		node.Entries[index] = predecessor
 		//update memory usage
 		bt.currentMemoryUsage += len(predecessor.Key) - len(node.Entries[index].Key) // -deleted key + predecessory key
+		deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 		return bt.deleteRecursive(leftChild, predecessor.Key)
 	}
 
@@ -1253,6 +1461,7 @@ func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int) string {
 		node.Entries[index] = successor
 		//update memory usage
 		bt.currentMemoryUsage += len(successor.Key) - len(node.Entries[index].Key) // -deleted key + successor key
+		deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 		return bt.deleteRecursive(rightChild, successor.Key)
 	}
 
@@ -1262,7 +1471,7 @@ func (bt *BTree) deleteInternalNodeEntry(node *BTreeNode, index int) string {
 	return bt.deleteRecursive(mergedNode, key)
 }
 
-func (bt *BTree) deleteFromIndexFile(indexFile string, key string) string {
+func deleteFromIndexFile(indexFile string, key string) string {
 	if indexFile == "" {
 		return fmt.Sprintf("Failed: Key '%s' not found in index files, indexFile missing", key)
 	}
@@ -1297,10 +1506,18 @@ func (bt *BTree) deleteFromIndexFile(indexFile string, key string) string {
 			continue // Skip this key
 		}
 
-		writer.WriteString(line + "\n")
+		_, err := writer.WriteString(line + "\n")
+		if err != nil {
+			tempFile.Close()
+			os.Remove(indexFile + ".tmp")
+			return fmt.Sprintf("Failed: Error writing to temp file: %v", err)
+		}
+		writer.Flush()
 	}
 
 	writer.Flush()
+	tempFile.Close()
+	file.Close()
 
 	// Replace old file with temp file
 	if err := os.Rename(indexFile+".tmp", indexFile); err != nil {
@@ -1310,7 +1527,7 @@ func (bt *BTree) deleteFromIndexFile(indexFile string, key string) string {
 	if keyFound {
 		return fmt.Sprintf("Success: Key '%s' deleted from index file", key)
 	}
-	return fmt.Sprintf("Failed: Key '%s' not found, might be looking in the wrong index file", key)
+	return fmt.Sprintf("Failed: Key '%s' not found in the index file", key)
 }
 
 // Merge a parent node's two children and move a parent's entry down to merged node

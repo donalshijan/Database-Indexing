@@ -8,4 +8,5 @@ type Database interface {
 	StopIndexing()
 	ClearIndex()
 	GetMaxMemoryUsage() int64
+	GetCurrentMemoryUsage() int64
 }
