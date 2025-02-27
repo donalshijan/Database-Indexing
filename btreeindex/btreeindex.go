@@ -123,7 +123,7 @@ func (btreeIndex *BTreeIndex) loadIndex() {
 
 // NewBTree creates a new B-tree with an empty root
 func NewBTree() (*BTree, error) {
-	branching_factor := 16
+	branching_factor := 8 // This has to be greater than 2
 	return &BTree{
 		Root:                                nil, // The root is initially set to nil
 		currentMemoryUsage:                  0,
@@ -413,7 +413,7 @@ func appendToIndexFile(indexFile string, indexEntry IndexEntry, checkIfEntryAlre
 }
 
 func writeEntriesToFile(filename string, h heap.Interface) bool {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	defer file.Close()
 	if err != nil {
 		return false
@@ -421,7 +421,6 @@ func writeEntriesToFile(filename string, h heap.Interface) bool {
 
 	for h.Len() > 0 {
 		entry := heap.Pop(h).(IndexEntry)
-		file.Seek(0, io.SeekEnd)
 		_, err := file.WriteString(fmt.Sprintf("%s:%d\n", entry.Key, entry.FileOffset))
 		if err != nil {
 			return false
@@ -740,32 +739,31 @@ func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string) {
 	/*
 		For propagating spliting operation upto parent if parent overflows which we are not doing as of now, unlike deletion, insertion can be forgiving of not maintaining tree balance
 		at all times.
-		It needs more testing.
 	*/
 
-	// if len(parent.Entries) > bt.maxEntries {
-	// 	if parent.Parent != nil {
-	// 		grandParent := parent.Parent
-	// 		for i, child := range grandParent.Children {
-	// 			if child.ChildNode == parent {
-	// 				return bt.splitNode(grandParent, i)
-	// 			}
-	// 		}
-	// 	} else {
-	// 		// Root is full, need to split
-	// 		newRoot := &BTreeNode{
-	// 			IsLeaf:   false,
-	// 			Children: make([]ChildPointer, 1),
-	// 			Parent:   nil,
-	// 		}
+	if len(parent.Entries) > bt.maxEntries {
+		if parent.Parent != nil {
+			grandParent := parent.Parent
+			for i, child := range grandParent.Children {
+				if child.ChildNode == parent {
+					return bt.splitNode(grandParent, i)
+				}
+			}
+		} else {
+			// Root is full, need to split
+			newRoot := &BTreeNode{
+				IsLeaf:   false,
+				Children: make([]ChildPointer, 1),
+				Parent:   nil,
+			}
 
-	// 		// Point first child pointer to previous root
-	// 		newRoot.Children[0] = ChildPointer{ChildNode: bt.Root}
-	// 		bt.Root.Parent = newRoot
-	// 		bt.Root = newRoot
-	// 		return bt.splitNode(newRoot, 0)
-	// 	}
-	// }
+			// Point first child pointer to previous root
+			newRoot.Children[0] = ChildPointer{ChildNode: bt.Root}
+			bt.Root.Parent = newRoot
+			bt.Root = newRoot
+			return bt.splitNode(newRoot, 0)
+		}
+	}
 	return true, ""
 }
 
@@ -888,14 +886,15 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 		return fmt.Sprintf("Failed: Key '%s' already exists", indexEntry.Key)
 	}
 	child := node.Children[i].ChildNode
-	if len(child.Entries) > bt.maxEntries { // Assuming max of 5 keys per node before splitting
+	if len(child.Entries) > bt.maxEntries {
 		success, message := bt.splitNode(node, i)
 		if !success {
 			return message
 		}
-		if indexEntry.Key > node.Entries[i].Key {
-			child = node.Children[i+1].ChildNode
-		}
+		// if indexEntry.Key > node.Entries[i].Key {
+		// 	child = node.Children[i+1].ChildNode
+		// }
+		return bt.Insert(indexEntry)
 	}
 	return bt.insertNonFull(child, indexEntry)
 }
@@ -1152,17 +1151,17 @@ func (bt *BTree) deleteRecursive(node *BTreeNode, key string) string {
 
 // Increases the number of entries in a node with less than min entries by 1
 func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
-	child := parent.Children[index].ChildNode
+	underflowNode := parent.Children[index].ChildNode
 
 	// Try borrowing from left sibling
 	if index > 0 && len(parent.Children[index-1].ChildNode.Entries) > bt.minEntries {
 		leftSibling := parent.Children[index-1].ChildNode
 
 		// Move last key from leftSibling to parent
-		newEntries := make([]IndexEntry, len(child.Entries)+1)
+		newEntries := make([]IndexEntry, len(underflowNode.Entries)+1)
 		newEntries[0] = parent.Entries[index-1]
-		copy(newEntries[1:], child.Entries) // Shift child entries to the right
-		child.Entries = newEntries
+		copy(newEntries[1:], underflowNode.Entries) // Shift child entries to the right
+		underflowNode.Entries = newEntries
 
 		// Move key from leftSibling to parent
 		parent.Entries[index-1] = leftSibling.Entries[len(leftSibling.Entries)-1]
@@ -1170,20 +1169,20 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 		copy(newSiblingEntries, leftSibling.Entries[:len(leftSibling.Entries)-1])
 		leftSibling.Entries = newSiblingEntries
 
-		// Move last child pointer (index file reference) from leftSibling to child
-		newChildren := make([]ChildPointer, len(child.Children)+1)
+		// Move last child pointer from leftSibling to child
+		newChildren := make([]ChildPointer, len(underflowNode.Children)+1)
 		// Update child pointers
 		if leftSibling.Children[len(leftSibling.Children)-1].ChildNode != nil {
 			for _, child_pointer := range leftSibling.Children[len(leftSibling.Children)-1].ChildNode.Children {
 				if child_pointer.ChildNode != nil {
-					child_pointer.ChildNode.Parent = child
+					child_pointer.ChildNode.Parent = underflowNode
 				}
 			}
 		}
 
 		newChildren[0] = leftSibling.Children[len(leftSibling.Children)-1] // Move the last child
-		copy(newChildren[1:], child.Children)                              // Shift existing child pointers to the right
-		child.Children = newChildren
+		copy(newChildren[1:], underflowNode.Children)                      // Shift existing child pointers to the right
+		underflowNode.Children = newChildren
 
 		// Remove the moved child pointer from leftSibling
 		newSiblingChildren := make([]ChildPointer, len(leftSibling.Children)-1)
@@ -1198,10 +1197,10 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 		rightSibling := parent.Children[index+1].ChildNode
 
 		// Move first key from rightSibling to parent
-		newEntries := make([]IndexEntry, len(child.Entries)+1)
-		copy(newEntries, child.Entries)                        // Copy existing entries
-		newEntries[len(child.Entries)] = parent.Entries[index] // Append parent's entry
-		child.Entries = newEntries
+		newEntries := make([]IndexEntry, len(underflowNode.Entries)+1)
+		copy(newEntries, underflowNode.Entries)                        // Copy existing entries
+		newEntries[len(underflowNode.Entries)] = parent.Entries[index] // Append parent's entry
+		underflowNode.Entries = newEntries
 
 		// Move key from rightSibling to parent
 		parent.Entries[index] = rightSibling.Entries[0]
@@ -1209,19 +1208,19 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 		copy(newSiblingEntries, rightSibling.Entries[1:])
 		rightSibling.Entries = newSiblingEntries
 
-		// Move first child pointer (index file reference) from rightSibling to child
-		newChildren := make([]ChildPointer, len(child.Children)+1)
-		copy(newChildren, child.Children) // Copy existing child pointers
+		// Move first child pointer from rightSibling to child
+		newChildren := make([]ChildPointer, len(underflowNode.Children)+1)
+		copy(newChildren, underflowNode.Children) // Copy existing child pointers
 		// Update child pointers
 		if rightSibling.Children[0].ChildNode != nil {
 			for _, child_pointer := range rightSibling.Children[0].ChildNode.Children {
 				if child_pointer.ChildNode != nil {
-					child_pointer.ChildNode.Parent = child
+					child_pointer.ChildNode.Parent = underflowNode
 				}
 			}
 		}
-		newChildren[len(child.Children)] = rightSibling.Children[0] // Append right sibling's first child pointer
-		child.Children = newChildren
+		newChildren[len(underflowNode.Children)] = rightSibling.Children[0] // Append right sibling's first child pointer
+		underflowNode.Children = newChildren
 
 		// Remove the moved child pointer from rightSibling
 		newSiblingChildren := make([]ChildPointer, len(rightSibling.Children)-1)
@@ -1271,6 +1270,8 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		predecessorKey, predecessorOffset, found := getMaxEntryFromIndexFile(leftIndexFile)
 		if found {
 			node.Entries[index] = IndexEntry{Key: predecessorKey, FileOffset: predecessorOffset}
+			//update memory usage
+			bt.currentMemoryUsage -= (len(originalEntry.Key) - len(predecessorKey))
 			deleteFromIndexFile(leftIndexFile, predecessorKey)
 			deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 			return "Success: Replaced with predecessor and deleted from index file"
@@ -1282,6 +1283,8 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		successorKey, successorOffset, found := getMinEntryFromIndexFile(rightIndexFile)
 		if found {
 			node.Entries[index] = IndexEntry{Key: successorKey, FileOffset: successorOffset}
+			//update memory usage
+			bt.currentMemoryUsage -= (len(originalEntry.Key) - len(successorKey))
 			deleteFromIndexFile(rightIndexFile, successorKey)
 			deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 			return "Success: Replaced with successor and deleted from index file"
@@ -1585,7 +1588,7 @@ func (bt *BTree) mergeNodes(parent *BTreeNode, index int) *BTreeNode {
 		bt.Root.Parent = nil
 	}
 
-	// If merged node's parent is now underflowing, and mergeNode is not root (if it were mergeNode.parent will be nil) fix underflow
+	// If merged node's parent is now underflowing, and mergeNode is not root (if it was, mergeNode.parent would have been nil) fix underflow
 	if mergedNode.Parent != nil && len(mergedNode.Parent.Entries) < bt.minEntries {
 		grandParent := mergedNode.Parent
 		for i, child := range grandParent.Children {
@@ -1606,6 +1609,11 @@ func (bt *BTree) getPredecessor(node *BTreeNode) IndexEntry {
 	for !curr.IsLeaf {
 		curr = curr.Children[len(curr.Children)-1].ChildNode
 	}
+	// look for max entry in right most index file
+	predecessorKey, predecessorOffset, found := getMaxEntryFromIndexFile(curr.Children[len(curr.Children)-1].IndexFile)
+	if found {
+		return IndexEntry{Key: predecessorKey, FileOffset: predecessorOffset}
+	}
 	// Return the rightmost key in this leaf node
 	return curr.Entries[len(curr.Entries)-1]
 }
@@ -1616,6 +1624,12 @@ func (bt *BTree) getSuccessor(node *BTreeNode) IndexEntry {
 	for !curr.IsLeaf {
 		curr = curr.Children[0].ChildNode
 	}
+	// look for min entry in left most index file
+	successorKey, successorOffset, found := getMinEntryFromIndexFile(curr.Children[0].IndexFile)
+	if found {
+		return IndexEntry{Key: successorKey, FileOffset: successorOffset}
+	}
+
 	// Return the leftmost key in this leaf node
 	return curr.Entries[0]
 }

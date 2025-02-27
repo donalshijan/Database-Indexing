@@ -219,73 +219,27 @@ func (hi *HashIndex) Delete(key string) string {
 	defer hi.mu.Unlock()
 
 	// Check if the key exists in the index map
-	offset, exists := hi.index[key]
+	_, exists := hi.index[key]
 	if !exists {
 		return fmt.Sprintf("Failed: Key '%s' does not exist", key)
 	}
 
-	// Open the data file for reading
-	file, err := os.Open(hi.dataFile)
-	if err != nil {
-		return fmt.Sprintf("Failed: Could not open data file: %v", err)
-	}
-	defer file.Close()
-
-	// Create a temporary file for writing
-	tempFile, err := os.Create(hi.dataFile + ".tmp")
-	if err != nil {
-		return fmt.Sprintf("Failed: Could not create temporary file: %v", err)
-	}
-	defer tempFile.Close()
-
-	// Create a reader and writer
-	reader := bufio.NewReader(file)
-	writer := bufio.NewWriter(tempFile)
-
-	// Skip over the entry at the specified offset
-	currentOffset := int64(0)
-	removedSize := 0 // Track the size of the deleted entry
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return fmt.Sprintf("Failed: Error reading data file: %v", err)
-		}
-		if err == io.EOF {
-			break
-		}
-
-		if currentOffset == offset {
-			// Skip this entry (mark it as deleted)
-			removedSize = len(line)
-			currentOffset += int64(len(line))
-			continue
-		}
-
-		// Write to the temporary file
-		writer.WriteString(line)
-		currentOffset += int64(len(line))
-	}
-
-	// Flush the writer to ensure all data is written
-	writer.Flush()
-
 	// Remove the key from the index file
-	err = hi.removeKeyFromIndexFile(key)
+	err := hi.removeKeyFromIndexFile(key)
 	if err != nil {
 		return fmt.Sprintf("Failed: Could not update index file: %v", err)
 	}
 
-	// Replace the original data file with the temporary file
-	err = os.Rename(hi.dataFile+".tmp", hi.dataFile)
-	if err != nil {
-		return fmt.Sprintf("Failed: Could not replace data file: %v", err)
+	delete(hi.index, key)
+
+	// Confirm key deletion
+	if _, exists := hi.index[key]; !exists {
+		entrySize := estimateEntrySize(key)
+		hi.currentMemoryUsage -= entrySize
+	} else {
+		fmt.Printf("Warning: Attempted to delete key '%s', but it's still in the index\n", key)
 	}
-	// Update offsets in memory
-	for k, v := range hi.index {
-		if v > offset {
-			hi.index[k] = v - int64(removedSize)
-		}
-	}
+
 	return fmt.Sprintf("Success: Key '%s' deleted", key)
 }
 
@@ -307,10 +261,6 @@ func (hi *HashIndex) removeKeyFromIndexFile(key string) error {
 	scanner := bufio.NewScanner(file)
 	writer := bufio.NewWriter(tempFile)
 
-	// Track the size of the removed entry
-	removedOffset := int64(0)
-	removedSize := 0
-
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.SplitN(line, ":", 2)
@@ -318,35 +268,21 @@ func (hi *HashIndex) removeKeyFromIndexFile(key string) error {
 			continue
 		}
 
-		currentKey := parts[0]
-		offset, _ := strconv.ParseInt(parts[1], 10, 64)
-
-		if currentKey == key {
-			// Track the size of the removed entry
-			removedOffset = offset
-			removedSize = len(line) + 1 // Include the newline
+		if parts[0] == key {
 			continue
 		}
 
-		// Adjust the offset for subsequent entries
-		if offset > removedOffset {
-			offset -= int64(removedSize)
-		}
-
 		// Write updated entry to the temp file
-		writer.WriteString(fmt.Sprintf("%s:%d\n", currentKey, offset))
+		_, err := writer.WriteString(line + "\n")
+		if err != nil {
+			tempFile.Close()
+			os.Remove(hi.indexFile + ".tmp")
+			return err
+		}
 	}
 
 	writer.Flush()
-	delete(hi.index, key)
 
-	// Confirm key deletion
-	if _, exists := hi.index[key]; !exists {
-		entrySize := estimateEntrySize(key)
-		hi.currentMemoryUsage -= entrySize
-	} else {
-		fmt.Printf("Warning: Attempted to delete key '%s', but it's still in the index\n", key)
-	}
 	// Replace the original file with the temporary file
 	err = os.Rename(hi.indexFile+".tmp", hi.indexFile)
 	if err != nil {

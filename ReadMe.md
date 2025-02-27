@@ -10,7 +10,7 @@ When data gets appended to data file , the offset at which it got appended is no
 Hash map is used to map every data's Key to it's offset in data file. This `HashMap<key=>Offset>` obviously resides in memory while the data itself is on file stored on disk.
 The most important feature of a database, is persistance, that is what makes a db a db. So to guarantee persistence, we need to introduce index file, the whole purpose of index file in the case of hash index is to maintain a copy of the hashmap in a file on disk, to make sure even if the database program crashes, the Index still persists on disk albeit as a file, but it can easily be used to reconstruct the Hash Index on restart, by inserting every entry in the file to the a new HashIndex. Write Ahead logs can be used to avoid maintaining copy of HashMap entries of HashIndexed DB on disk as a file altogether and achieve persistence in a much more elegant way, but we will leave that for later iterations.
 For every insert operation, after the data gets appended to the data file, it's offset is entered into the HashMap at it's key. Immediately afterwards the index file also appends a new entry as `Key:Offset` for this insertion in the index file.
-For search operation, we lookup the offset for a key in the hashmap and retrieve the data from the data file at that offset. For deletion, we will move all the data to a temporary data file skipping over the data to be removed, and then rename the temporary data file as the new data file, then remove that key from hashmap and also remove that key and offset entry from the index file the same way as we did for data file by creating a new temporary index file and copying all but the entry with that key, and make this temporary index file the new index file. This is not the most efficient way of doing this, as there are many strategies to improve upon this , which will be explored later. Updation is done by deletion followed by insertion of new value.
+For search operation, we lookup the offset for a key in the hashmap and retrieve the data from the data file at that offset. For deletion, we remove that key from hashmap and also remove that key and offset entry from the index file by creating a new temporary index file and copying all but the entry with that key, and make this temporary index file the new index file. This is not the most efficient way of doing this, as there are many strategies to improve upon this , which will be explored later. Updation is done by deletion followed by insertion of new value.
 
 ## BTree Index
 
@@ -21,6 +21,7 @@ Updation is done by deletion followed by insertion with new value.
 
 This implementation of BTree index is a non preemptive implementation or also known as lazy implementation, because in this implementation, merge and split operations which rebalances the tree is done respectively only when overflow and underflow condition is detected while traversing down the tree in attempt to insert a new entry or delete an entry.
 In preemptive implementation also knows as eager implementation, this is done as soon as an overflow or underflow occurs immediately after insertion or deletion respectively, which ensures every operation when completed leaves the tree in a balanced state, whereas the non preemptive implementation only balances after constraint violation or imbalances get detected when traversing down the tree for the next operation. Essentially what this means is that, we could leave the tree in an imbalanced or constraint violated state when we finish an operation, and it will only get picked up for correction in the next operation down that same path, as in the one which traverses down that same path where violation or imbalance occured previously, hence it is called lazy implementation as it often leaves the tree imbalanced and balances less frequently and partially as compared to eager implementation, which always leaves the whole tree balanced after every operation.
+This BTree implementation works only for branching factors greater than 2.
 
 Since, data is stored first in the data file, before inserting the `Key:Offset` entry for that data into the BTreeIndex, data always persists on disk by default.
 All entries stored in index files pointed by leaf node's child pointers, will also persist on disk even when program crashes, for internal nodes, as a new entry gets added or removed to any internal node, that entry is also made to a separate index file which contains all entries of all internal nodes. In the event of a crash, you can reconstruct the index by inserting each entry from all these index files into the new BtreeIndex one by one.
@@ -42,7 +43,7 @@ Every other time when you restart after exiting gracefully, you can pass in the 
 
 Everytime we restart the program after gracefully terminating in previous run, if we intend to rebuild and continue with the index where we left of, we pass in the same data file and index file that we did before, obviously they would have been populated to reflect all data storage that happened until before exiting and the state of the Index, In which case,   Data file in the case of both Hash and BTree Index holds the data, index file in the case of hash index will maintain a copy of the hashmap as it was before exiting, whereas the index file in the case of BTree index will contain the entire BTreeIndex including entries form internal nodes, leaf nodes and index files pointed to by leaf nodes, encoded and stored into one single file.
 
-If we wish to build a new index instead of re constructing and continuing with a previously built and used index, create a new data file and index file and pass them as the parameter.
+If we wish to build a new index instead of reconstructing and continuing with a previously built and used index, create a new data file and index file and pass them as the parameter.
 
 We don't pass anything directly, all files which we need, their path is supposed to be exposed in the .env file, the program will fetch the file at the file path associated with that environment variable.
 
@@ -53,10 +54,12 @@ Finally when running the program we need to pass an argument, either `hash` or `
 
 The CLI will guide you with the command usage for interaction.
 
-When running the program in btree index mode, if the program crashes while running tests, then to clean up all those index files generated by test manually, would be a pain, so to help with that, a script thas been provided to delete all those index files.
+When running the program in btree index mode, if the program crashes while running tests, then to clean up all those index files generated by test manually, would be a pain, so to help with that, a script thas been provided to delete all those index files. (Hopefully, you will never need this)
 
 To delete index files generated when running test using script 
 
     chmod +x delete_index_files.sh
 
     ./delete_index_files.sh
+
+
