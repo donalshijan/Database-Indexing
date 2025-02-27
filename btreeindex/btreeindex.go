@@ -633,7 +633,7 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 		newRoot.Children[0] = ChildPointer{ChildNode: root}
 		root.Parent = newRoot
 		bt.Root = newRoot
-		success, message := bt.splitNode(newRoot, 0)
+		success, message, _ := bt.splitNode(newRoot, 0)
 		if !success {
 			return message
 		}
@@ -643,11 +643,11 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 }
 
 // splitNode splits a full node into two nodes and moves the mid element from full node to the parent
-func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string) {
+func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string, *BTreeNode) {
 	//estimate memory usage
 	childPointerSize := 1 * 16 // One new child pointer ( ~16 bytes)
 	if bt.currentMemoryUsage+childPointerSize > MaxMemoryUsage {
-		return false, "Failed: Memory limit exceeded"
+		return false, "Failed: Memory limit exceeded", parent
 	}
 	fullNode := parent.Children[index].ChildNode
 	midIndex := len(fullNode.Entries) / 2
@@ -764,7 +764,7 @@ func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string) {
 			return bt.splitNode(newRoot, 0)
 		}
 	}
-	return true, ""
+	return true, "", parent
 }
 
 // insertNonFull inserts a key into a node that is not full
@@ -887,14 +887,11 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 	}
 	child := node.Children[i].ChildNode
 	if len(child.Entries) > bt.maxEntries {
-		success, message := bt.splitNode(node, i)
+		success, message, nodeToRestartInsertProcedureFromAfterPropagatingSplitUpTheTree := bt.splitNode(node, i)
 		if !success {
 			return message
 		}
-		// if indexEntry.Key > node.Entries[i].Key {
-		// 	child = node.Children[i+1].ChildNode
-		// }
-		return bt.Insert(indexEntry)
+		return bt.insertNonFull(nodeToRestartInsertProcedureFromAfterPropagatingSplitUpTheTree, indexEntry)
 	}
 	return bt.insertNonFull(child, indexEntry)
 }
