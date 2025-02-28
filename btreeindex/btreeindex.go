@@ -1378,16 +1378,16 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 	// update memory usage
 	bt.currentMemoryUsage -= (entrySize + childPointerSize)
 
-	//  Check for underflow and handle it
-	if len(node.Entries) < bt.minEntries && node != bt.Root {
-		parent := node.Parent
-		for i, child := range parent.Children {
-			if child.ChildNode == node {
-				bt.fillUnderflow(parent, i)
-				break
-			}
-		}
-	}
+	//  Checking for underflow after removing an entry from leaf node and handle it (We won't do that here as it is a no preemptive implementation, doing this is more suited for preemptive implementation).
+	// if len(node.Entries) < bt.minEntries && node != bt.Root {
+	// 	parent := node.Parent
+	// 	for i, child := range parent.Children {
+	// 		if child.ChildNode == node {
+	// 			bt.fillUnderflow(parent, i)
+	// 			break
+	// 		}
+	// 	}
+	// }
 
 	deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 	return "Success: Entry removed and left index file deleted"
