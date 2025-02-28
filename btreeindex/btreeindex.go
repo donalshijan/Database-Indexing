@@ -29,8 +29,8 @@ type BTreeNode struct {
 }
 
 type ChildPointer struct {
-	IndexFile string     // Path to child index file (for internal nodes)
-	ChildNode *BTreeNode // In-memory reference (nil when loaded from disk)
+	IndexFile string     // Index file's pointed to by leaf Nodes (nil for Internal nodes)
+	ChildNode *BTreeNode // In-memory reference , pointer pointing to child nodes of internal nodes (nil for Leaf nodes)
 }
 
 // Define the B-tree structure
@@ -40,6 +40,7 @@ type BTree struct {
 	maxEntries                          int
 	minEntries                          int
 	indexFileToStoreInternalNodeEntries string
+	indexFiles                          []string
 }
 
 type BTreeIndex struct {
@@ -49,8 +50,6 @@ type BTreeIndex struct {
 	mu                    sync.RWMutex
 }
 
-var indexFiles []string
-
 const MaxMemoryUsage = 102400 // bytes (102400 = 100KB ~= 0.1MB)
 
 func (bti *BTreeIndex) GetMaxMemoryUsage() int64 {
@@ -59,6 +58,15 @@ func (bti *BTreeIndex) GetMaxMemoryUsage() int64 {
 
 func (bti *BTreeIndex) GetCurrentMemoryUsage() int64 {
 	return int64(bti.btree.currentMemoryUsage)
+}
+
+func GetBTreeNodeMemoryOverhead() int {
+	// A slice in Go is a header (24 bytes) containing, Pointer to the backing array (8 bytes), Length (8 bytes), Capacity (8 bytes).
+	// A bool takes 1 byte, but due to alignment, it may be padded to 8 bytes.
+	// A pointer on a 64-bit system takes 8 bytes.
+	// Total memory overhead = 2 * slice overhead for Entries and Children slices of node + bool overehead for IsLeaf field + Pointer overhead for Parent field of type (*BTreeNode)
+	// Total memory overhead = 2* 24 + 8 + 8 = 64
+	return 64
 }
 
 type MinHeap []IndexEntry
@@ -98,7 +106,7 @@ func NewBTreeIndex(dataFilename, encodedBTreeIndexFileFilename string) *BTreeInd
 	btreeIndex := &BTreeIndex{
 		dataFile:              dataFilename,
 		encodedBTreeIndexFile: encodedBTreeIndexFileFilename,
-		btree:                 nil, // Assign the BTree to the index field
+		btree:                 nil,
 	}
 	btree, err := NewBTree() // Call NewBTree to get the BTree
 	if err != nil {
@@ -129,7 +137,7 @@ func NewBTree() (*BTree, error) {
 		currentMemoryUsage:                  0,
 		maxEntries:                          2*branching_factor - 1,
 		minEntries:                          branching_factor - 1,
-		indexFileToStoreInternalNodeEntries: createNewIndexFile(),
+		indexFileToStoreInternalNodeEntries: "",
 	}, nil
 }
 
@@ -138,7 +146,7 @@ func (bti *BTreeIndex) ClearIndex() {
 	defer bti.mu.Unlock()
 
 	// Delete all index files from disk
-	for _, indexFile := range indexFiles {
+	for _, indexFile := range bti.btree.indexFiles {
 		err := os.Remove(indexFile)
 		if err != nil {
 			fmt.Printf("Warning: Failed to delete index file %s: %v\n", indexFile, err)
@@ -146,7 +154,7 @@ func (bti *BTreeIndex) ClearIndex() {
 	}
 
 	// Clear the index files list
-	indexFiles = []string{}
+	bti.btree.indexFiles = []string{}
 
 	// Reset the B-tree structure
 	bti.btree.Root = nil
@@ -354,7 +362,7 @@ func printNode(node *BTreeNode, level int) {
 }
 
 // Helper function to create a new index file
-func createNewIndexFile() string {
+func (bt *BTree) createNewIndexFile() string {
 	// Atomically increment counter
 	counter := atomic.AddUint64(&indexFileCounter, 1)
 
@@ -372,7 +380,10 @@ func createNewIndexFile() string {
 	file.Close()
 
 	// Store the filename globally
-	indexFiles = append(indexFiles, indexFile)
+	bt.indexFiles = append(bt.indexFiles, indexFile)
+
+	//update memory usage
+	bt.currentMemoryUsage += len(indexFile) + 16 // fileName len (bytes) + 16 bytes string overhead
 
 	return file.Name()
 }
@@ -520,12 +531,12 @@ func (bt *BTree) appendToIndexFileAndHandleIndexFileOverflow(indexFile string, i
 			medianEntry = heap.Pop(maxHeap).(IndexEntry)
 		}
 
-		// Update memory usage
+		// Estimate memory usage
 		entrySize := len(medianEntry.Key) + 8 + 16 // Key length + int64 offset+ string overhead
 		childPointerSize := 1 * 16                 // one new child pointers (each ~16 bytes)
 
-		indexFileForKeyEntriesSmallerThanMedian := createNewIndexFile()
-		indexFileForKeyEntriesGreaterThanMedian := createNewIndexFile()
+		indexFileForKeyEntriesSmallerThanMedian := bt.createNewIndexFile()
+		indexFileForKeyEntriesGreaterThanMedian := bt.createNewIndexFile()
 
 		successfullyCreatedIndexFileEntriesForSmallerHalf := writeEntriesToFile(indexFileForKeyEntriesSmallerThanMedian, maxHeap)
 		successfullyCreatedIndexFileEntriesForGreaterHalf := writeEntriesToFile(indexFileForKeyEntriesGreaterThanMedian, minHeap)
@@ -534,6 +545,11 @@ func (bt *BTree) appendToIndexFileAndHandleIndexFileOverflow(indexFile string, i
 			*maxHeap = (*maxHeap)[:0] // Clear maxHeap
 			*minHeap = (*minHeap)[:0] // Clear minHeap
 			return fmt.Sprintf("Failed: Error occured while splitting index file ")
+		}
+
+		// check if memory usage exceeds
+		if bt.currentMemoryUsage+int(entrySize+childPointerSize) > MaxMemoryUsage {
+			return "Failed: Memory limit exceeded"
 		}
 
 		// insert median into leaf node and update child pointers to point to these new index files
@@ -556,7 +572,7 @@ func (bt *BTree) appendToIndexFileAndHandleIndexFileOverflow(indexFile string, i
 		bt.currentMemoryUsage += int(entrySize + childPointerSize)
 
 		os.Remove(indexFile)
-		DeleteIndexFile(indexFile)
+		bt.DeleteIndexFile(indexFile)
 	}
 
 	*maxHeap = (*maxHeap)[:0] // Clear maxHeap
@@ -604,18 +620,25 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 			Parent:   nil,
 		}
 
+		//Since this is the first entry it is a good time to create an index file for internal node entries
+		bt.indexFileToStoreInternalNodeEntries = bt.createNewIndexFile()
+
 		appendToIndexFile(bt.indexFileToStoreInternalNodeEntries, indexEntry, false)
 		// Create two new index files for before and after the key
-		beforeIndexFile := createNewIndexFile()
-		afterIndexFile := createNewIndexFile()
+		beforeIndexFile := bt.createNewIndexFile()
+		afterIndexFile := bt.createNewIndexFile()
 
+		// estimate memory usage
+		entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset+ string overhead
+		childPointerSize := 2 * 16                // Two child pointers (each ~16 bytes)
+		if bt.currentMemoryUsage+int(entrySize+childPointerSize)+GetBTreeNodeMemoryOverhead() > MaxMemoryUsage {
+			return "Failed: Memory limit exceeded"
+		}
 		// Assign child pointers
 		bt.Root.Children[0] = ChildPointer{IndexFile: beforeIndexFile}
 		bt.Root.Children[1] = ChildPointer{IndexFile: afterIndexFile}
-		// Update memory usage
-		entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset+ string overhead
-		childPointerSize := 2 * 16                // Two child pointers (each ~16 bytes)
-		bt.currentMemoryUsage += int(entrySize + childPointerSize)
+		//update memory usage
+		bt.currentMemoryUsage += int(entrySize+childPointerSize) + GetBTreeNodeMemoryOverhead()
 		return fmt.Sprintf("Success: Key '%s' inserted", indexEntry.Key)
 	}
 
@@ -633,6 +656,15 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 		newRoot.Children[0] = ChildPointer{ChildNode: root}
 		root.Parent = newRoot
 		bt.Root = newRoot
+
+		//estimate memory usage
+		childPointerSize := 1 * 16 // One new child pointers (each ~16 bytes)
+		if bt.currentMemoryUsage+GetBTreeNodeMemoryOverhead()+childPointerSize > MaxMemoryUsage {
+			return "Failed: Memory limit exceeded"
+		}
+		//update memory usage
+		bt.currentMemoryUsage += GetBTreeNodeMemoryOverhead() + childPointerSize // One new node + one new Child Pointer
+
 		success, message, _ := bt.splitNode(newRoot, 0)
 		if !success {
 			return message
@@ -646,7 +678,7 @@ func (bt *BTree) Insert(indexEntry IndexEntry) string {
 func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string, *BTreeNode) {
 	//estimate memory usage
 	childPointerSize := 1 * 16 // One new child pointer ( ~16 bytes)
-	if bt.currentMemoryUsage+childPointerSize > MaxMemoryUsage {
+	if bt.currentMemoryUsage+childPointerSize+GetBTreeNodeMemoryOverhead() > MaxMemoryUsage {
 		return false, "Failed: Memory limit exceeded", parent
 	}
 	fullNode := parent.Children[index].ChildNode
@@ -708,7 +740,7 @@ func (bt *BTree) splitNode(parent *BTreeNode, index int) (bool, string, *BTreeNo
 	}
 
 	// Update memory usage
-	bt.currentMemoryUsage += int(childPointerSize)
+	bt.currentMemoryUsage += int(childPointerSize) + GetBTreeNodeMemoryOverhead()
 
 	// Create new slices for parent's updated entries and children
 	newEntries := make([]IndexEntry, len(parent.Entries)+1)
@@ -783,12 +815,6 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 		if i == 0 || i == len(node.Entries) {
 			// Check if we have enough keys already
 			if len(node.Entries) <= bt.maxEntries { // Assuming max of maxEntries keys per node before splitting
-				//estimate memory usage
-				entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
-				childPointerSize := 1 * 16                // One child pointer (each ~16 bytes)
-				if bt.currentMemoryUsage+entrySize+childPointerSize > MaxMemoryUsage {
-					return "Failed: Memory limit exceeded"
-				}
 				if i == 0 {
 					// Check smallest key in the first index file
 					indexFile := node.Children[0].IndexFile
@@ -799,6 +825,15 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 							// return appendToIndexFile(indexFile, indexEntry, true)
 							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
+					}
+
+					// Create an index file for the range before the first key
+					rangeIndexFile := bt.createNewIndexFile()
+					//estimate memory usage
+					entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
+					childPointerSize := 1 * 16                // One child pointer (each ~16 bytes)
+					if bt.currentMemoryUsage+entrySize+childPointerSize > MaxMemoryUsage {
+						return "Failed: Memory limit exceeded"
 					}
 					// Manually inserting `indexEntry` at the beginning of `node.Entries`
 					newEntries := make([]IndexEntry, len(node.Entries)+1)
@@ -813,8 +848,6 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						newEntries[i+1] = node.Entries[i]
 					}
 
-					// Create an index file for the range before the first key
-					rangeIndexFile := createNewIndexFile()
 					// Create a new index file and insert it at the beginning of `Children`
 					newChildren[0] = ChildPointer{IndexFile: rangeIndexFile}
 
@@ -826,6 +859,9 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 					// Assign back to the node
 					node.Entries = newEntries
 					node.Children = newChildren
+
+					// Update memory usage
+					bt.currentMemoryUsage += int(entrySize + childPointerSize)
 				} else {
 					// Check largest key in the last index file
 					indexFile := node.Children[len(node.Entries)].IndexFile
@@ -837,6 +873,16 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
 					}
+
+					// Create an index file for the range after the last key
+					rangeIndexFile := bt.createNewIndexFile()
+					//estimate memory usage
+					entrySize := len(indexEntry.Key) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
+					childPointerSize := 1 * 16                // One child pointer (each ~16 bytes)
+					if bt.currentMemoryUsage+entrySize+childPointerSize > MaxMemoryUsage {
+						return "Failed: Memory limit exceeded"
+					}
+
 					// Manually inserting `indexEntry` at the end of `node.Entries`
 					newEntries := make([]IndexEntry, len(node.Entries)+1)
 					newChildren := make([]ChildPointer, len(node.Children)+1)
@@ -854,17 +900,16 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						newChildren[i] = node.Children[i]
 					}
 
-					// Create an index file for the range after the last key
-					rangeIndexFile := createNewIndexFile()
 					// Insert the new child pointer at the end
 					newChildren[len(newChildren)-1] = ChildPointer{IndexFile: rangeIndexFile}
 
 					// Assign back to the node
 					node.Entries = newEntries
 					node.Children = newChildren
+
+					// Update memory usage
+					bt.currentMemoryUsage += int(entrySize + childPointerSize)
 				}
-				// Update memory usage
-				bt.currentMemoryUsage += int(entrySize + childPointerSize)
 				return fmt.Sprintf("Success: Key '%s' inserted", indexEntry.Key)
 			}
 		}
@@ -1235,10 +1280,10 @@ func (bt *BTree) fillUnderflow(parent *BTreeNode, index int) {
 	}
 }
 
-func DeleteIndexFile(indexFile string) {
+func (bt *BTree) DeleteIndexFile(indexFile string) {
 	// Count valid entries first to determine the exact size
 	count := 0
-	for _, file := range indexFiles {
+	for _, file := range bt.indexFiles {
 		if file != indexFile {
 			count++
 		}
@@ -1247,7 +1292,7 @@ func DeleteIndexFile(indexFile string) {
 	// Allocate a new slice with the exact required size
 	newIndexFiles := make([]string, count)
 	index := 0
-	for _, file := range indexFiles {
+	for _, file := range bt.indexFiles {
 		if file != indexFile {
 			newIndexFiles[index] = file
 			index++
@@ -1255,7 +1300,9 @@ func DeleteIndexFile(indexFile string) {
 	}
 
 	// Update the global indexFiles array
-	indexFiles = newIndexFiles
+	bt.indexFiles = newIndexFiles
+	//update memory usage
+	bt.currentMemoryUsage -= (len(indexFile) + 16)
 }
 
 func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
@@ -1294,15 +1341,19 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 		node.Children = nil
 
 		os.Remove(leftIndexFile)
-		DeleteIndexFile(leftIndexFile)
+		bt.DeleteIndexFile(leftIndexFile)
 		os.Remove(rightIndexFile)
-		DeleteIndexFile(rightIndexFile)
+		bt.DeleteIndexFile(rightIndexFile)
+
+		deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
 
 		if node == bt.Root {
+			os.Remove(bt.indexFileToStoreInternalNodeEntries)
+			bt.DeleteIndexFile(bt.indexFileToStoreInternalNodeEntries)
 			bt.currentMemoryUsage = 0
 			bt.Root = nil
 		}
-		deleteFromIndexFile(bt.indexFileToStoreInternalNodeEntries, originalEntry.Key)
+
 		return "Success: Last Entry deleted, tree is empty"
 	}
 
@@ -1323,7 +1374,7 @@ func (bt *BTree) deleteLeafNodeEntry(node *BTreeNode, index int) string {
 	node.Children = newChildren
 
 	os.Remove(leftIndexFile)
-	DeleteIndexFile(leftIndexFile)
+	bt.DeleteIndexFile(leftIndexFile)
 	// update memory usage
 	bt.currentMemoryUsage -= (entrySize + childPointerSize)
 
@@ -1578,11 +1629,13 @@ func (bt *BTree) mergeNodes(parent *BTreeNode, index int) *BTreeNode {
 	parent.Children = newChildren
 
 	// update memory usage
-	bt.currentMemoryUsage -= childPointerSize
+	bt.currentMemoryUsage -= (childPointerSize + GetBTreeNodeMemoryOverhead())
 	// If parent becomes empty, update root
 	if parent == bt.Root && len(parent.Entries) == 0 {
 		bt.Root = mergedNode
 		bt.Root.Parent = nil
+		//update memory usage
+		bt.currentMemoryUsage -= GetBTreeNodeMemoryOverhead()
 	}
 
 	// If merged node's parent is now underflowing, and mergeNode is not root (if it was, mergeNode.parent would have been nil) fix underflow
@@ -1674,7 +1727,7 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 				case string:
 					// If it's an index file content (enclosed in `#...#`), create a new index file
 					if strings.HasPrefix(v, "#") && strings.HasSuffix(v, "#") {
-						indexFile := createNewIndexFile() // Create a new index file
+						indexFile := bti.btree.createNewIndexFile() // Create a new index file
 						isLeaf = true
 
 						// Extract key-value pairs from `#...#`
