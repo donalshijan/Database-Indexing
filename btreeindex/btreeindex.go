@@ -1699,6 +1699,7 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 	stack := []interface{}{} // Stack to store elements during parsing
 	var i int                // Index tracker
 	var memoryUsage int
+	var indexFileForInternalNodesEntries string
 	for i < len(encodedStr) {
 		char := encodedStr[i]
 
@@ -1763,6 +1764,10 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 								return nil, fmt.Errorf("invalid offset: %s", parts[1])
 							}
 							entries = append([]IndexEntry{{Key: parts[0], FileOffset: offset}}, entries...)
+							if indexFileForInternalNodesEntries == "" {
+								indexFileForInternalNodesEntries = bti.btree.createNewIndexFile()
+							}
+							appendToIndexFile(indexFileForInternalNodesEntries, IndexEntry{Key: parts[0], FileOffset: offset}, false)
 							// update memory usage
 							entrySize := len(parts[0]) + 8 + 16 // Key length + int64 offset + string overhead 16 bytes
 							memoryUsage += entrySize
@@ -1783,6 +1788,13 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 				Entries:  entries,
 				Children: children,
 				IsLeaf:   isLeaf,
+			}
+
+			// update parent field of all child nodes to point to this new node
+			for _, child_pointer := range newNode.Children {
+				if child_pointer.ChildNode != nil {
+					child_pointer.ChildNode.Parent = newNode
+				}
 			}
 
 			// Push the newly created node back onto the stack
@@ -1824,5 +1836,13 @@ func (bti *BTreeIndex) DecodeAndReconstructBTreeIndexFromEncodedBTreeIndexFile(f
 		return nil, fmt.Errorf("decoding failed, root is not a BTreeNode")
 	}
 
-	return &BTree{Root: rootNode, maxEntries: 5, currentMemoryUsage: memoryUsage}, nil
+	btree, err := NewBTree()
+	if err != nil {
+		return nil, err
+	}
+	btree.Root = rootNode
+	btree.currentMemoryUsage = memoryUsage
+	btree.indexFileToStoreInternalNodeEntries = indexFileForInternalNodesEntries
+	btree.indexFiles = bti.btree.indexFiles
+	return btree, nil
 }
