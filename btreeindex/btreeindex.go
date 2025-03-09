@@ -822,8 +822,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						smallestKey, _, found := getMinEntryFromIndexFile(indexFile)
 						if found && indexEntry.Key > smallestKey {
 							// Append to index file instead
-							// return appendToIndexFile(indexFile, indexEntry, true)
-							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
+							return appendToIndexFile(indexFile, indexEntry, true)
+							// return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
 					}
 
@@ -869,8 +869,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 						largestKey, _, found := getMaxEntryFromIndexFile(indexFile)
 						if found && indexEntry.Key < largestKey {
 							// Append to index file instead
-							// return appendToIndexFile(indexFile, indexEntry, true)
-							return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
+							return appendToIndexFile(indexFile, indexEntry, true)
+							// return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 						}
 					}
 
@@ -917,8 +917,8 @@ func (bt *BTree) insertNonFull(node *BTreeNode, indexEntry IndexEntry) string {
 		// Case 2: Look up the respective index file and append the entry
 		indexFile := node.Children[i].IndexFile
 
-		// return appendToIndexFile(indexFile, indexEntry, true)
-		return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
+		return appendToIndexFile(indexFile, indexEntry, true)
+		// return bt.appendToIndexFileAndHandleIndexFileOverflow(indexFile, indexEntry, node, i)
 	}
 
 	// Case 3: Insert into an internal node
