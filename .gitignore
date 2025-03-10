@@ -40,3 +40,6 @@
 *.log
 # db files
 *.db
+
+# WAL directory
+wal_dir

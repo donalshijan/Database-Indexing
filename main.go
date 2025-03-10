@@ -12,6 +12,7 @@ import (
 	"database_indexing/btreeindex"
 	"database_indexing/database"
 	"database_indexing/hashindex"
+	"database_indexing/wal"
 
 	"github.com/briandowns/spinner"
 	"github.com/joho/godotenv"
@@ -19,7 +20,7 @@ import (
 )
 
 // Load environment variables from .env file
-func loadEnv(dbType string) (string, string) {
+func loadEnv(dbType string) (string, string, string) {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
@@ -36,12 +37,12 @@ func loadEnv(dbType string) (string, string) {
 	} else {
 		log.Fatal("Invalid database type. Use 'hash' or 'btree'")
 	}
-
-	if dataFile == "" || indexFile == "" {
+	wal_dir := os.Getenv("WAL_DIR_PATH")
+	if dataFile == "" || indexFile == "" || wal_dir == "" {
 		log.Fatal("Required environment variables are missing in .env file")
 	}
 
-	return dataFile, indexFile
+	return dataFile, indexFile, wal_dir
 }
 
 // Generate a random 8-letter word
@@ -273,6 +274,62 @@ func averageTime(times []time.Duration) time.Duration {
 	return total / time.Duration(len(times))
 }
 
+func replayWALFileEntriesAndReconstructIndex(db database.Database, wal *wal.WAL) {
+
+	// Read all WAL entries and replay them into the database
+	entries, err := wal.ReadAll()
+	if err != nil {
+		fmt.Println("Error reading WAL entries:", err)
+		return
+	}
+
+	for _, entry := range entries {
+
+		// Assume entries follow format: "operation key value"
+		parts := strings.SplitN(string(entry), "|", 3)
+		if len(parts) < 2 {
+			fmt.Println("Invalid entry, skipping:", string(entry))
+			continue
+		}
+
+		command, key := parts[0], parts[1]
+		switch command {
+		case "insert":
+			if len(parts) < 3 {
+				fmt.Println("Invalid insert entry, skipping:", string(entry))
+				continue
+			}
+			value := parts[2]
+			db.Insert(key, value)
+		case "delete":
+			db.Delete(key)
+		case "update":
+			if len(parts) < 3 {
+				fmt.Println("Invalid update entry, skipping:", string(entry))
+				continue
+			}
+			value := parts[2]
+			db.Update(key, value)
+		default:
+			fmt.Println("Unknown WAL operation, skipping:", string(entry))
+		}
+	}
+
+	fmt.Println("WAL replay completed. Index reconstructed successfully.")
+}
+
+func setupWAL(walDir string) (*wal.WAL, error) {
+	// Check if metadata file exists
+	metadataPath := walDir + "/wal_metadata.json"
+	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+		fmt.Println("No WAL metadata file found, starting new WAL")
+		return wal.NewWAL(walDir)
+	}
+
+	fmt.Println("WAL metadata found, loading previous WAL")
+	return wal.LoadPrevWAL(walDir)
+}
+
 func main() {
 
 	// Check if index type is provided as an argument
@@ -285,19 +342,21 @@ func main() {
 	indexType := strings.ToLower(os.Args[1])
 
 	var db database.Database
-
+	var WAL_DIR_PATH string
 	// Initialize the appropriate index type
 	switch indexType {
 	case "hash":
 		// Load file paths from .env
-		dataFile, indexFile := loadEnv(indexType)
+		dataFile, indexFile, walDir := loadEnv(indexType)
 		db = hashindex.NewHashIndex(dataFile, indexFile)
+		WAL_DIR_PATH = walDir
 		fmt.Println("Using Hash Indexed Database")
 
 	case "btree":
 		// Load file paths from .env
-		dataFile, encodedBTreeIndexFile := loadEnv(indexType)
+		dataFile, encodedBTreeIndexFile, walDir := loadEnv(indexType)
 		db = btreeindex.NewBTreeIndex(dataFile, encodedBTreeIndexFile)
+		WAL_DIR_PATH = walDir
 		fmt.Println("Using BTree Indexed Database")
 
 	default:
@@ -305,7 +364,24 @@ func main() {
 		return
 	}
 
-	fmt.Println("Commands: insert <key> <value> | search <key> | delete <key> | update <key> <value> | run_performance_test | exit")
+	// create wal directory if not exists
+	if _, err := os.Stat(WAL_DIR_PATH); os.IsNotExist(err) {
+		if err := os.MkdirAll(WAL_DIR_PATH, os.ModePerm); err != nil {
+			log.Fatalf("Failed to create directory %s: %v", WAL_DIR_PATH, err)
+			return
+		} else {
+			log.Printf("Created directory: %s", WAL_DIR_PATH)
+		}
+	}
+
+	// **Determine if this is a new WAL or a restart**
+	wal, err := setupWAL(WAL_DIR_PATH)
+	if err != nil {
+		log.Fatalf("Failed to initialize WAL: %v", err)
+	}
+	fmt.Println("WAL initialized successfully")
+
+	fmt.Println("Commands: insert <key> <value> | search <key> | delete <key> | update <key> <value> | run_performance_test | replay_wal_entries_to_reconstruct_index | exit")
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -321,7 +397,7 @@ func main() {
 		}
 
 		args := strings.SplitN(input, " ", 3)
-		if len(args) < 2 && args[0] != "run_performance_test" {
+		if len(args) < 2 && (args[0] != "run_performance_test" && args[0] != "replay_wal_entries_to_reconstruct_index") {
 			fmt.Println("Invalid command format. Try again.")
 			continue
 		}
@@ -338,6 +414,14 @@ func main() {
 				continue
 			}
 			value := args[2]
+
+			// writing to wal
+			entry := fmt.Sprintf("insert|%s|%s", key, value) // Create WAL entry
+			if err := wal.Write([]byte(entry)); err != nil { // Log the operation in WAL
+				fmt.Println("WAL write failed:", err)
+				continue
+			}
+
 			result := db.Insert(key, value)
 
 			// Check if the result starts with "Success"
@@ -356,6 +440,14 @@ func main() {
 			}
 
 		case "delete":
+
+			// writing to wal
+			entry := fmt.Sprintf("delete|%s", key)           // WAL entry for delete
+			if err := wal.Write([]byte(entry)); err != nil { // Log deletion
+				fmt.Println("WAL write failed:", err)
+				continue
+			}
+
 			result := db.Delete(key)
 			if strings.HasPrefix(result, "Success") {
 				fmt.Printf("Deleted key: %s\n", key)
@@ -369,6 +461,14 @@ func main() {
 				continue
 			}
 			value := args[2]
+
+			// writing to wal
+			entry := fmt.Sprintf("update|%s|%s", key, value) // WAL entry for update
+			if err := wal.Write([]byte(entry)); err != nil { // Log update operation
+				fmt.Println("WAL write failed:", err)
+				continue
+			}
+
 			result := db.Update(key, value)
 			if strings.HasPrefix(result, "Success") {
 				fmt.Printf("Updated: %s -> %s\n", key, value)
@@ -379,6 +479,10 @@ func main() {
 		case "run_performance_test":
 			fmt.Println("Running performance test...")
 			performanceTest(indexType)
+
+		case "replay_wal_entries_to_reconstruct_index":
+			fmt.Printf("Replaying WAL entries from and reconstructing index.")
+			replayWALFileEntriesAndReconstructIndex(db, wal)
 
 		default:
 			fmt.Println("Unknown command. Use insert, search, delete, update, run_performance_test, or exit.")
