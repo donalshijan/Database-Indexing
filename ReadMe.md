@@ -63,3 +63,9 @@ To delete index files generated when running test using script
     ./delete_index_files.sh
 
 
+## 💖 Support This Project
+If you like this project, you can support me:
+
+- 💸 [PayPal](https://paypal.me/donalshijan)
+- ☕ [Buy Me a Coffee](https://buymeacoffee.com/donalshijan)
+
